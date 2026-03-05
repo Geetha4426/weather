@@ -16,9 +16,9 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import TradeSignal
+from weather.config import Config
 
 
 class LiveTrader:
@@ -372,7 +372,8 @@ class LiveTrader:
             should_exit = False
             reason = ''
 
-            if pnl_pct >= 50:
+            exit_pct = Config.WEATHER_EXIT_EDGE * 100  # Use config threshold
+            if pnl_pct >= exit_pct:
                 should_exit, reason = True, 'take_profit'
             elif pnl_pct <= -25:
                 should_exit, reason = True, 'stop_loss'
@@ -463,14 +464,24 @@ class LiveTrader:
             signed_order = self.clob_client.create_order(order_args)
             resp = self.clob_client.post_order(signed_order, OrderType.FOK)
 
-            if not resp or resp.get('status') == 'error':
+            sell_ok = resp and resp.get('status') != 'error'
+            if not sell_ok:
                 # GTC fallback
-                resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+                try:
+                    resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+                    sell_ok = resp and resp.get('status') != 'error'
+                except Exception:
+                    pass
 
         except Exception as e:
-            print(f"⚠️ Sell error: {e}", flush=True)
+            print(f"\u26a0\ufe0f Sell error: {e}", flush=True)
+            sell_ok = False
 
-        # Finalize
+        if not sell_ok:
+            print(f"\u26a0\ufe0f Could not sell {pos.get('outcome_label','')} — keeping position", flush=True)
+            return False
+
+        # Finalize only on successful sell
         pnl_pct = (exit_price / pos['entry_price'] - 1) * 100 if pos['entry_price'] > 0 else 0
         pos['exit_price'] = exit_price
         pos['pnl'] = round(pnl, 4)
@@ -501,6 +512,7 @@ class LiveTrader:
         scale = 0.6 + (confidence - 0.4) * (0.4 / 0.5)
         scale = max(0.5, min(1.0, scale))
         size = self.balance * base_pct * scale
+        size = min(size, Config.WEATHER_MAX_POSITION_USD)
         return max(Config.POLYMARKET_MIN_ORDER_SIZE, round(size, 2))
 
     def get_summary(self) -> Dict:

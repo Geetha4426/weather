@@ -2,10 +2,10 @@
 import sys
 import os
 
-# Ensure parent directory is on the path so 'weather_prediction' package is importable
+# Ensure parent directory is on the path so 'weather' package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
-from weather_prediction.data.weather_client import WeatherClient
+from weather.data.weather_client import WeatherClient
 
 print("=" * 50)
 print("Weather Client Test")
@@ -16,7 +16,7 @@ c = WeatherClient()
 # Test 1: Basic forecast
 f = c.get_forecast('london')
 if f:
-    print(f"OK London forecast: max={f['max_temp_c']}C, min={f['min_temp_c']}C")
+    print(f"OK London forecast: max={f['max_temp']}{f['unit_symbol']}, min={f['min_temp']}{f['unit_symbol']}")
 else:
     print("FAIL Forecast failed")
 
@@ -39,7 +39,7 @@ else:
     print("WARN No historical data")
 
 # Test 4: Market discovery
-from weather_prediction.data.weather_market_client import WeatherMarketClient
+from weather.data.weather_market_client import WeatherMarketClient
 mc = WeatherMarketClient()
 markets = mc.discover_markets(['london', 'new-york'])
 print(f"\nOK Market discovery: found {len(markets)} weather markets")

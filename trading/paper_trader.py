@@ -11,9 +11,9 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import TradeSignal
+from weather.config import Config
 
 
 class PaperTrader:

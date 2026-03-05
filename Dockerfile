@@ -2,9 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY weather_prediction/requirements.txt ./
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY weather_prediction/ ./weather_prediction/
+COPY weather/ ./weather/
 
-CMD ["python", "-m", "weather_prediction.app"]
+CMD ["python", "-m", "weather.app"]

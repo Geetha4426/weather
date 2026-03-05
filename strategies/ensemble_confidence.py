@@ -10,9 +10,9 @@ Handles Fahrenheit (US) and Celsius (non-US) ranges/boundaries.
 from typing import Dict, List
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class EnsembleConfidenceStrategy(BaseStrategy):

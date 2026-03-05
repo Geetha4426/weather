@@ -17,16 +17,16 @@ and returns the best signals sorted by priority + confidence.
 from typing import Dict, List
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.strategies.intraday_tracker import IntradayTrackerStrategy
-from weather_prediction.strategies.frontrun import FrontrunStrategy
-from weather_prediction.strategies.adjacent_bracket import AdjacentBracketStrategy
-from weather_prediction.strategies.convergence import ConvergenceStrategy
-from weather_prediction.strategies.forecast_edge import ForecastEdgeStrategy
-from weather_prediction.strategies.value_hunter import ValueHunterStrategy
-from weather_prediction.strategies.ensemble_confidence import EnsembleConfidenceStrategy
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.strategies.intraday_tracker import IntradayTrackerStrategy
+from weather.strategies.frontrun import FrontrunStrategy
+from weather.strategies.adjacent_bracket import AdjacentBracketStrategy
+from weather.strategies.convergence import ConvergenceStrategy
+from weather.strategies.forecast_edge import ForecastEdgeStrategy
+from weather.strategies.value_hunter import ValueHunterStrategy
+from weather.strategies.ensemble_confidence import EnsembleConfidenceStrategy
+from weather.config import Config
 
 
 # Priority weights — higher = more priority when ranking signals
