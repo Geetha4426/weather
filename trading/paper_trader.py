@@ -57,6 +57,10 @@ class PaperTrader:
         if not can:
             return None
 
+        # Reject junk outcomes
+        if signal.entry_price < Config.WEATHER_MIN_MARKET_PRICE:
+            return None
+
         size = self.get_position_size(signal.confidence)
         if size > self.balance:
             size = max(Config.POLYMARKET_MIN_ORDER_SIZE, self.balance * 0.5)
@@ -132,13 +136,16 @@ class PaperTrader:
             if pnl_pct >= exit_pct:  # Take profit at 45%
                 should_exit = True
                 reason = 'take_profit'
-            elif pnl_pct <= -25:  # Stop loss at 25%
+            elif entry_price < 0.10 and pnl_pct <= -50:  # Cheap position: -50% stop
+                should_exit = True
+                reason = 'stop_loss'
+            elif entry_price >= 0.10 and pnl_pct <= -30:  # Standard position: -30% stop
                 should_exit = True
                 reason = 'stop_loss'
             elif current_price >= 0.95:  # Near-certainty → take profit
                 should_exit = True
                 reason = 'near_certainty'
-            elif current_price <= 0.02:  # Near-zero → cut
+            elif current_price <= 0.01 and entry_price > 0.03:  # Collapsed to nothing
                 should_exit = True
                 reason = 'near_zero'
 

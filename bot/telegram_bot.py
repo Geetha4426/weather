@@ -28,6 +28,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from weather.config import Config
 
 
+def _md_escape(text: str) -> str:
+    """Escape Telegram MarkdownV1 special characters in dynamic text."""
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
+
 class TelegramBot:
     """Telegram bot for the weather prediction trader."""
 
@@ -490,17 +497,24 @@ class TelegramBot:
                 text=text,
                 parse_mode='Markdown'
             )
-        except Exception as e:
-            print(f"⚠️ Telegram send error: {e}", flush=True)
+        except Exception:
+            # Markdown parse failed — retry as plain text
+            try:
+                await self.app.bot.send_message(
+                    chat_id=Config.TELEGRAM_CHAT_ID,
+                    text=text
+                )
+            except Exception as e2:
+                print(f"⚠️ Telegram send error: {e2}", flush=True)
 
     async def send_trade_alert(self, trade: dict):
         """Send trade execution notification."""
         direction = trade.get('direction', 'YES')
-        city = trade.get('city', '').title()
-        label = trade.get('outcome_label', '')
+        city = _md_escape(trade.get('city', '').title())
+        label = _md_escape(trade.get('outcome_label', ''))
         price = trade.get('entry_price', 0)
         size = trade.get('size_usd', 0)
-        strategy = trade.get('strategy', '')
+        strategy = _md_escape(trade.get('strategy', ''))
 
         msg = (
             f"🌡️ *TRADE: {direction}*\n\n"
@@ -517,12 +531,16 @@ class TelegramBot:
         pnl = trade.get('pnl', 0) or 0
         emoji = '✅' if pnl >= 0 else '❌'
 
+        city = _md_escape(trade.get('city', '').title())
+        label = _md_escape(trade.get('outcome_label', ''))
+        reason = _md_escape(trade.get('exit_reason', ''))
+
         msg = (
             f"{emoji} *CLOSED*\n\n"
-            f"City: {trade.get('city', '').title()}\n"
-            f"Outcome: {trade.get('outcome_label', '')}\n"
+            f"City: {city}\n"
+            f"Outcome: {label}\n"
             f"P&L: ${pnl:+.4f} ({trade.get('pnl_pct', 0):+.1f}%)\n"
-            f"Reason: {trade.get('exit_reason', '')}"
+            f"Reason: {reason}"
         )
         await self.send_message(msg)
 

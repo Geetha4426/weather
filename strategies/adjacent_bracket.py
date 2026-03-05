@@ -95,6 +95,9 @@ class AdjacentBracketStrategy(BaseStrategy):
                 book = clob.get_orderbook(yes_token)
                 market_price = book['best_ask'] if book and not book.get('_synthetic') else o.get('price_yes', 0.5)
 
+                if market_price < 0.04:  # Skip junk outcomes
+                    continue
+
                 core_outcomes.append({
                     'outcome': o,
                     'temp_mid': temp_mid,

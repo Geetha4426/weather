@@ -76,6 +76,8 @@ class ValueHunterStrategy(BaseStrategy):
 
         signals = []
         for o, price, yt in valid:
+            if price < 0.04:  # Skip junk outcomes
+                continue
             signals.append(TradeSignal(
                 strategy=self.name, city=city, target_date=target_date,
                 direction='YES',
@@ -117,7 +119,7 @@ class ValueHunterStrategy(BaseStrategy):
             book = clob.get_orderbook(no_token)
             entry = book['best_ask'] if book and not book.get('_synthetic') else no_price
 
-            if entry >= 0.95:
+            if entry >= 0.95 or entry < 0.04:  # Skip extremes
                 continue
 
             signals.append(TradeSignal(

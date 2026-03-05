@@ -84,7 +84,7 @@ class ForecastEdgeStrategy(BaseStrategy):
             else:
                 market_price = outcome.get('price_yes', 0.5)
 
-            if market_price <= 0.005 or market_price >= 0.99:
+            if market_price < 0.04 or market_price >= 0.99:
                 continue
 
             # Calculate edge

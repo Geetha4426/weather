@@ -193,6 +193,10 @@ class LiveTrader:
         if self._trading_paused:
             return None
 
+        # Reject junk outcomes
+        if signal.entry_price < Config.WEATHER_MIN_MARKET_PRICE:
+            return None
+
         if self.balance < Config.POLYMARKET_MIN_ORDER_SIZE:
             return None
 
@@ -375,11 +379,13 @@ class LiveTrader:
             exit_pct = Config.WEATHER_EXIT_EDGE * 100  # Use config threshold
             if pnl_pct >= exit_pct:
                 should_exit, reason = True, 'take_profit'
-            elif pnl_pct <= -25:
+            elif entry < 0.10 and pnl_pct <= -50:  # Cheap position: -50% stop
+                should_exit, reason = True, 'stop_loss'
+            elif entry >= 0.10 and pnl_pct <= -30:  # Standard position: -30% stop
                 should_exit, reason = True, 'stop_loss'
             elif current_price >= 0.95:
                 should_exit, reason = True, 'near_certainty'
-            elif current_price <= 0.02:
+            elif current_price <= 0.01 and entry > 0.03:  # Collapsed to nothing
                 should_exit, reason = True, 'near_zero'
 
             if should_exit:

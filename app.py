@@ -329,6 +329,10 @@ class WeatherTradingEngine:
                         if event_positions >= Config.WEATHER_MAX_POSITIONS_PER_EVENT:
                             continue
 
+                        # ═══ Skip junk: don't buy outcomes priced below minimum ═══
+                        if signal.entry_price < Config.WEATHER_MIN_MARKET_PRICE:
+                            continue
+
                         # ═══ ML: Risk manager pre-trade check ═══
                         trade_size = min(Config.WEATHER_MAX_POSITION_USD,
                                         self.active_trader.balance * Config.WEATHER_POSITION_SIZE_PCT / 100)
