@@ -34,6 +34,11 @@ from weather_prediction.data.weather_market_client import WeatherMarketClient
 from weather_prediction.data.clob_client import ClobClient
 from weather_prediction.data.database import Database
 from weather_prediction.strategies.dynamic_picker import WeatherDynamicPicker
+try:
+    from weather_prediction.ml.ml_strategy_engine import MLStrategyEngine
+    HAS_ML = True
+except ImportError:
+    HAS_ML = False
 from weather_prediction.trading.paper_trader import PaperTrader
 from weather_prediction.trading.live_trader import LiveTrader
 from weather_prediction.bot.telegram_bot import TelegramBot
@@ -56,8 +61,15 @@ class WeatherTradingEngine:
         # Active mode
         self.trading_mode = Config.TRADING_MODE
 
-        # Strategy
-        self.strategy = WeatherDynamicPicker()
+        # Strategy — ML engine with fallback to base picker
+        if HAS_ML:
+            self.strategy = MLStrategyEngine()
+            self.ml_engine = self.strategy
+            print("🧠 ML Strategy Engine loaded (bias correction, Bayesian, momentum)", flush=True)
+        else:
+            self.strategy = WeatherDynamicPicker()
+            self.ml_engine = None
+            print("📋 Base strategy loaded (ML not available — install scikit-learn)", flush=True)
 
         # Telegram bot
         self.bot = TelegramBot(engine=self)
@@ -212,6 +224,7 @@ class WeatherTradingEngine:
                         'weather_client': self.weather_client,
                         'forecast': forecast,
                         'seconds_remaining': seconds_remaining,
+                        'open_positions': len(self.active_trader.get_open_positions()),
                     }
 
                     # Run strategies
@@ -273,12 +286,16 @@ class WeatherTradingEngine:
                 if scan_count <= 3 or scan_count % 20 == 0:
                     summary = self.active_trader.get_summary()
                     mode_tag = '🔴LIVE' if self.trading_mode == 'live' else '📋PAPER'
+                    ml_tag = ''
+                    if self.ml_engine:
+                        ml_stats = self.ml_engine.get_stats()
+                        ml_tag = f" | ML: {ml_stats['filter_rate']:.0f}% filtered"
                     print(
                         f"📊 [{mode_tag}] Scan #{scan_count} | "
                         f"Markets: {len(markets)} | "
                         f"Balance: ${summary['balance']:.2f} | "
                         f"Trades: {summary['total_trades']} | "
-                        f"Open: {summary['open_positions']}",
+                        f"Open: {summary['open_positions']}{ml_tag}",
                         flush=True
                     )
 
