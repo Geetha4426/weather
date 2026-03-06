@@ -73,6 +73,10 @@ class ForecastEdgeStrategy(BaseStrategy):
             # Calculate forecast probability for this outcome
             forecast_prob = self._get_outcome_probability(outcome, prob_dist)
 
+            # CRITICAL: Skip outcomes our forecast says are unlikely
+            if forecast_prob < Config.WEATHER_MIN_FORECAST_PROB:
+                continue
+
             # Get market price
             yes_token = outcome.get('token_id_yes', '')
             if not yes_token:
@@ -93,13 +97,13 @@ class ForecastEdgeStrategy(BaseStrategy):
             if edge < self.min_edge:
                 continue
 
-            # Confidence scoring
+            # Confidence = anchored to actual forecast probability
+            # High forecast prob + good edge + good timing = high confidence
             time_factor = self._time_confidence(seconds_remaining)
-            edge_factor = min(1.0, edge / 0.30)
             confidence = (
-                model_confidence * 0.40 +
-                edge_factor * 0.35 +
-                time_factor * 0.25
+                forecast_prob * 0.50 +          # 50% = actual probability (the anchor)
+                model_confidence * 0.25 +        # 25% = model agreement
+                time_factor * 0.25               # 25% = time to resolution
             )
 
             if confidence < self.min_confidence:

@@ -88,6 +88,10 @@ class Config:
     # Outcomes at $0.01 = 1% chance → almost always lose
     WEATHER_MIN_MARKET_PRICE = float(os.getenv('WEATHER_MIN_MARKET_PRICE', '0.04'))
 
+    # Minimum forecast probability to trade an outcome
+    # Don't bet on outcomes our models say have < 10% chance
+    WEATHER_MIN_FORECAST_PROB = float(os.getenv('WEATHER_MIN_FORECAST_PROB', '0.10'))
+
     # Position sizing as % of balance (used when max_position not set)
     WEATHER_POSITION_SIZE_PCT = float(os.getenv('WEATHER_POSITION_SIZE_PCT', '5.0'))
 

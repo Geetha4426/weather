@@ -97,6 +97,12 @@ class WeatherDynamicPicker(BaseStrategy):
             s.metadata['raw_confidence'] = s.confidence
             s.confidence = s.confidence * 0.60 + priority * 0.40
 
+            # SAFETY CAP: confidence cannot exceed forecast probability + 20%
+            # This prevents 87% confidence on a 5% probability outcome
+            forecast_prob = s.metadata.get('forecast_prob', 1.0)
+            max_allowed = min(0.95, forecast_prob + 0.20)
+            s.confidence = min(s.confidence, max_allowed)
+
         # Deduplicate: if multiple strategies suggest same token, keep highest score
         seen_tokens = {}
         for s in all_signals:

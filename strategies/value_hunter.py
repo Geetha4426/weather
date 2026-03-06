@@ -64,7 +64,10 @@ class ValueHunterStrategy(BaseStrategy):
                 continue
             book = clob.get_orderbook(yt)
             price = book['best_ask'] if book and not book.get('_synthetic') else o.get('price_yes', 0.5)
-            if 0 < price < 1:
+            # Only count non-junk outcomes in sum check
+            if price < 0.04:
+                continue
+            if 0.04 <= price < 1:
                 total_cost += price
                 valid.append((o, price, yt))
 
@@ -108,7 +111,9 @@ class ValueHunterStrategy(BaseStrategy):
             market_price = o.get('price_yes', 0.5)
             overprice = market_price - forecast_prob
 
-            if overprice < 0.15:  # 15% overprice threshold
+            # Need significant overprice AND low forecast probability
+            # (don't short outcomes that are genuinely likely)
+            if overprice < 0.15 or forecast_prob > 0.20:
                 continue
 
             no_token = o.get('token_id_no', '')
@@ -122,6 +127,8 @@ class ValueHunterStrategy(BaseStrategy):
             if entry >= 0.95 or entry < 0.04:  # Skip extremes
                 continue
 
+            # For NO: our win probability is (1 - forecast_prob)
+            no_win_prob = 1.0 - forecast_prob
             signals.append(TradeSignal(
                 strategy=self.name, city=city, target_date=target_date,
                 direction='NO',
@@ -130,7 +137,7 @@ class ValueHunterStrategy(BaseStrategy):
                 token_id=no_token,
                 market_id=o.get('market_id', ''),
                 entry_price=entry,
-                confidence=min(0.85, 0.50 + overprice),
+                confidence=min(0.85, no_win_prob * 0.60 + overprice * 1.0),
                 rationale=(
                     f"📉 OVERPRICED: {o.get('label', '')} "
                     f"market={market_price:.0%} vs forecast={forecast_prob:.0%}"
@@ -173,7 +180,7 @@ class ValueHunterStrategy(BaseStrategy):
             token_id=yt,
             market_id=best.get('market_id', ''),
             entry_price=entry,
-            confidence=min(0.90, forecast.get('confidence', 0.5) * 1.2) if edge > 0.10 else 0.60,
+            confidence=min(0.90, forecast_prob * 0.60 + forecast.get('confidence', 0.5) * 0.40),
             rationale=(
                 f"🎯 CONCENTRATION: {best.get('label', '')} "
                 f"forecast={forecast_prob:.0%} market={market_price:.0%} edge={edge:+.1%}"

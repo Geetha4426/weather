@@ -333,6 +333,16 @@ class WeatherTradingEngine:
                         if signal.entry_price < Config.WEATHER_MIN_MARKET_PRICE:
                             continue
 
+                        # ═══ Skip low-probability: don't bet on unlikely outcomes ═══
+                        forecast_prob = signal.metadata.get('forecast_prob', 0)
+                        if signal.direction == 'YES' and forecast_prob < Config.WEATHER_MIN_FORECAST_PROB:
+                            continue
+                        # For NO trades: the forecast_prob is the prob of the YES side
+                        # Low forecast_prob + high market price = good NO trade (overpriced tail)
+                        # So we check that the NO side probability is high enough
+                        if signal.direction == 'NO' and (1.0 - forecast_prob) < Config.WEATHER_MIN_FORECAST_PROB:
+                            continue
+
                         # ═══ ML: Risk manager pre-trade check ═══
                         trade_size = min(Config.WEATHER_MAX_POSITION_USD,
                                         self.active_trader.balance * Config.WEATHER_POSITION_SIZE_PCT / 100)

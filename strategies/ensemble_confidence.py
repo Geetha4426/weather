@@ -65,6 +65,8 @@ class EnsembleConfidenceStrategy(BaseStrategy):
                 continue
 
             market_price = outcome.get('price_yes', 0.5)
+            if market_price < 0.04:
+                continue
             edge = forecast_prob - market_price
 
             if edge < 0.10:
@@ -79,7 +81,7 @@ class EnsembleConfidenceStrategy(BaseStrategy):
             if entry >= 0.90:
                 continue
 
-            confidence = min(0.95, model_confidence * 0.6 + edge * 2.0)
+            confidence = min(0.95, forecast_prob * 0.50 + model_confidence * 0.30 + edge * 1.0)
             unit_sym = forecast.get('unit_symbol', '°C')
 
             signals.append(TradeSignal(
