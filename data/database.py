@@ -175,6 +175,92 @@ class Database:
             'avg_pnl': avg_pnl or 0,
         }
 
+    async def get_all_trades(self) -> List[Dict]:
+        """Get ALL trades (both open and closed) for CSV export."""
+        if not self.db:
+            return []
+        cursor = await self.db.execute(
+            "SELECT * FROM trades ORDER BY entry_time ASC"
+        )
+        rows = await cursor.fetchall()
+        columns = [d[0] for d in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def trades_to_csv(self, trades: List[Dict]) -> str:
+        """
+        Convert trade list to a comprehensive CSV string.
+        Includes all fields needed for analysis.
+        """
+        import csv
+        import io
+
+        fieldnames = [
+            'trade_id', 'mode', 'status', 'city', 'target_date',
+            'strategy', 'direction', 'outcome_label', 'temp_c',
+            'entry_price', 'exit_price', 'size_usd', 'shares',
+            'pnl_usd', 'pnl_pct', 'result', 'confidence',
+            'entry_time', 'exit_time', 'duration_min', 'exit_reason',
+            'token_id', 'market_id', 'rationale',
+        ]
+
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for t in trades:
+            # Calculate duration
+            duration = ''
+            entry_time = t.get('entry_time', '')
+            exit_time = t.get('exit_time', '')
+            if entry_time and exit_time:
+                try:
+                    from datetime import datetime as dt
+                    e = dt.fromisoformat(entry_time.replace('Z', '+00:00'))
+                    x = dt.fromisoformat(exit_time.replace('Z', '+00:00'))
+                    duration = round((x - e).total_seconds() / 60, 1)
+                except Exception:
+                    duration = ''
+
+            # Determine mode from order_id
+            order_id = t.get('order_id', '')
+            mode = 'paper' if 'paper' in str(order_id) else 'live'
+
+            # Determine result
+            pnl = t.get('pnl')
+            if pnl is not None:
+                result = 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'BREAK_EVEN'
+            else:
+                result = 'OPEN'
+
+            writer.writerow({
+                'trade_id': t.get('id', ''),
+                'mode': mode,
+                'status': t.get('status', ''),
+                'city': t.get('city', ''),
+                'target_date': t.get('target_date', ''),
+                'strategy': t.get('strategy', ''),
+                'direction': t.get('direction', ''),
+                'outcome_label': t.get('outcome_label', ''),
+                'temp_c': t.get('temp_c', ''),
+                'entry_price': t.get('entry_price', ''),
+                'exit_price': t.get('exit_price', ''),
+                'size_usd': t.get('size_usd', ''),
+                'shares': t.get('shares', ''),
+                'pnl_usd': pnl if pnl is not None else '',
+                'pnl_pct': t.get('pnl_pct', ''),
+                'result': result,
+                'confidence': t.get('confidence', ''),
+                'entry_time': entry_time,
+                'exit_time': exit_time,
+                'duration_min': duration,
+                'exit_reason': t.get('exit_reason', ''),
+                'token_id': t.get('token_id', ''),
+                'market_id': t.get('market_id', ''),
+                'rationale': t.get('rationale', ''),
+            })
+
+        return output.getvalue()
+
     async def close(self):
         """Close the database connection."""
         if self.db:

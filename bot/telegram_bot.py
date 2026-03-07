@@ -15,6 +15,9 @@ Commands:
 """
 
 import asyncio
+import io
+import os
+from datetime import datetime
 from telegram import (
     Update, InlineKeyboardMarkup, InlineKeyboardButton,
     BotCommand
@@ -66,6 +69,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("risk", self.cmd_risk))
         self.app.add_handler(CommandHandler("ml", self.cmd_ml))
         self.app.add_handler(CommandHandler("calibration", self.cmd_calibration))
+        self.app.add_handler(CommandHandler("log", self.cmd_log))
 
         # Callbacks
         self.app.add_handler(CallbackQueryHandler(self.cb_handler))
@@ -99,6 +103,7 @@ class TelegramBot:
             f"/balance — Check balance\n"
             f"/markets — Scan live markets\n"
             f"/history — Trade history\n"
+            f"/log — Download trade log CSV\n"
             f"/risk — Risk manager status\n"
             f"/ml — ML module stats\n"
             f"/calibration — Confidence calibration\n"
@@ -463,6 +468,108 @@ class TelegramBot:
             msg += f"\n✅ Well-calibrated (drift: {score:+.0%})"
 
         await update.message.reply_text(msg, parse_mode='Markdown')
+
+    async def cmd_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Generate and send a CSV file with all trade history."""
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not ready")
+            return
+
+        await update.message.reply_text("📊 Generating trade log CSV...")
+
+        try:
+            # Get all trades from database
+            trades = await self.engine.db.get_all_trades()
+
+            # Also include in-memory open positions not yet in DB
+            trader = self.engine.active_trader
+            open_positions = trader.get_open_positions()
+            open_ids = {t.get('id') for t in trades}
+            for pos in open_positions:
+                if pos.get('id') not in open_ids:
+                    trades.append(pos)
+
+            if not trades:
+                await update.message.reply_text("📜 No trades recorded yet. Start trading first!")
+                return
+
+            # Generate CSV
+            csv_content = self.engine.db.trades_to_csv(trades)
+
+            # Calculate summary stats
+            closed = [t for t in trades if t.get('status') == 'closed']
+            open_count = len([t for t in trades if t.get('status') in ('open', 'pending')])
+            wins = len([t for t in closed if (t.get('pnl') or 0) > 0])
+            losses = len([t for t in closed if (t.get('pnl') or 0) < 0])
+            total_pnl = sum(t.get('pnl', 0) or 0 for t in closed)
+            win_rate = (wins / len(closed) * 100) if closed else 0
+
+            # Count by strategy
+            strategies = {}
+            for t in trades:
+                s = t.get('strategy', 'unknown')
+                strategies[s] = strategies.get(s, 0) + 1
+            strategy_breakdown = '\n'.join(
+                f"  {s}: {c}" for s, c in
+                sorted(strategies.items(), key=lambda x: -x[1])
+            )
+
+            # Count by city
+            cities = {}
+            for t in trades:
+                c = t.get('city', 'unknown')
+                cities[c] = cities.get(c, 0) + 1
+            city_breakdown = ', '.join(
+                f"{c.title()}: {n}" for c, n in
+                sorted(cities.items(), key=lambda x: -x[1])
+            )
+
+            # Best and worst trades
+            if closed:
+                best = max(closed, key=lambda t: t.get('pnl', 0) or 0)
+                worst = min(closed, key=lambda t: t.get('pnl', 0) or 0)
+                best_str = f"${best.get('pnl', 0):+.4f} ({best.get('city', '').title()} {best.get('outcome_label', '')})"
+                worst_str = f"${worst.get('pnl', 0):+.4f} ({worst.get('city', '').title()} {worst.get('outcome_label', '')})"
+            else:
+                best_str = 'N/A'
+                worst_str = 'N/A'
+
+            # Mode
+            paper_count = len([t for t in trades if 'paper' in str(t.get('order_id', ''))])
+            live_count = len(trades) - paper_count
+
+            # Send CSV as file
+            csv_bytes = csv_content.encode('utf-8')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+            filename = f"trade_log_{timestamp}.csv"
+
+            bio = io.BytesIO(csv_bytes)
+            bio.name = filename
+
+            summary = (
+                f"\U0001f4ca *Trade Log Summary*\n\n"
+                f"Total Trades: {len(trades)}\n"
+                f"  \U0001f4cb Paper: {paper_count} | \U0001f534 Live: {live_count}\n"
+                f"  Open: {open_count} | Closed: {len(closed)}\n\n"
+                f"*Performance:*\n"
+                f"  Win Rate: {win_rate:.0f}% ({wins}W / {losses}L)\n"
+                f"  Total PnL: ${total_pnl:+.4f}\n"
+                f"  Best: {best_str}\n"
+                f"  Worst: {worst_str}\n\n"
+                f"*By Strategy:*\n{strategy_breakdown}\n\n"
+                f"*By City:* {city_breakdown}\n\n"
+                f"\u2b07\ufe0f CSV file attached below"
+            )
+
+            await update.message.reply_text(summary, parse_mode='Markdown')
+            await update.message.reply_document(
+                document=bio,
+                filename=filename,
+                caption=f"\U0001f4c8 {len(trades)} trades | {win_rate:.0f}% win rate | ${total_pnl:+.4f} PnL"
+            )
+
+        except Exception as e:
+            await update.message.reply_text(f"\u274c Error generating log: {e}")
 
     # ═══════════════════════════════════════════════════════════════════
     # CALLBACKS
