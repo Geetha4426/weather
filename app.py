@@ -107,9 +107,8 @@ class WeatherTradingEngine:
         await self.db.init()
 
         # Initialize ML modules
-        await self.bias_corrector.init(self.db)
-        await self.confidence_calibrator.init(self.db)
-        print("🧠 ML modules initialized (bias, bayesian, calibrator, momentum, thresholds, risk)", flush=True)
+        if self.ml_engine and hasattr(self.ml_engine, 'init'):
+            await self.ml_engine.init(self.db)
 
         # Check Polymarket geoblock
         try:
@@ -146,20 +145,9 @@ class WeatherTradingEngine:
                 unit_sym = '°F' if self.weather_client.get_city_unit(city) == 'fahrenheit' else '°C'
                 print(f"  {city.title()}: bias={accuracy['bias']:+.1f}{unit_sym}, "
                       f"MAE={accuracy['mae']:.1f}{unit_sym} ({accuracy['days']} days)", flush=True)
-                # Feed historical data to ML bias corrector
-                for fc_temp, actual in [(p[1], p[2]) for p in accuracy.get('pairs', [])]:
-                    await self.bias_corrector.record(
-                        city, accuracy.get('pairs', [['']])[0][0] if accuracy.get('pairs') else '',
-                        fc_temp, actual
-                    )
-                # Feed accuracy to dynamic threshold engine
-                self.dynamic_threshold.set_city_accuracy(city, accuracy['mae'])
             else:
                 print(f"  {city.title()}: no historical data yet", flush=True)
 
-        # Initialize risk manager with starting balance
-        balance = self.active_trader.balance if hasattr(self.active_trader, 'balance') else Config.STARTING_BALANCE
-        self.risk_manager.set_starting_balance(balance)
 
         # Restore open positions from database
         try:
@@ -339,74 +327,17 @@ class WeatherTradingEngine:
                         if signal.direction == 'NO' and (1.0 - forecast_prob) < Config.WEATHER_MIN_FORECAST_PROB:
                             continue
 
-                        # ═══ ML: Risk manager pre-trade check ═══
-                        trade_size = min(Config.WEATHER_MAX_POSITION_USD,
-                                        self.active_trader.balance * Config.WEATHER_POSITION_SIZE_PCT / 100)
-                        can_trade, risk_reason = self.risk_manager.can_trade(
-                            city, trade_size, self.active_trader.balance
-                        )
-                        if not can_trade:
-                            if scan_count <= 3:
-                                print(f"🛡️ Risk block: {risk_reason}", flush=True)
-                            continue
-
-                        # ═══ ML: Correlation check ═══
-                        open_positions = self.active_trader.get_open_positions()
-                        corr_ok, corr_reason = self.risk_manager.check_correlation(
-                            city, signal.direction, open_positions
-                        )
-                        if not corr_ok:
-                            continue
-
-                        # ═══ ML: Calibrate confidence ═══
-                        raw_conf = signal.confidence
-                        signal.confidence = self.confidence_calibrator.calibrate(
-                            raw_conf, signal.strategy
-                        )
-
-                        # ═══ ML: Price momentum adjustment ═══
-                        momentum_adj = self.price_momentum.get_momentum_adjustment(signal.token_id)
-                        signal.confidence *= momentum_adj
-
-                        # ═══ ML: Check if we should delay (spike detection) ═══
-                        should_delay, delay_reason = self.price_momentum.should_delay_entry(signal.token_id)
-                        if should_delay:
-                            if scan_count <= 5:
-                                print(f"⏳ Delay: {delay_reason}", flush=True)
-                            continue
-
-                        # ═══ ML: Dynamic threshold check ═══
-                        edge = signal.metadata.get('edge', signal.confidence - signal.entry_price)
-                        should_enter, threshold, thresh_reason = self.dynamic_threshold.should_enter(
-                            edge, city, seconds_remaining,
-                            forecast.get('std_max', 2.0),
-                            liquidity=market.get('outcomes', [{}])[0].get('liquidity', 0),
-                            spread=market.get('outcomes', [{}])[0].get('spread', 0),
-                            forecast_unit=forecast.get('unit', 'celsius'),
-                        )
-                        if not should_enter:
-                            continue
-
-                        signal.metadata['ml_calibrated_conf'] = signal.confidence
-                        signal.metadata['momentum_adj'] = momentum_adj
-                        signal.metadata['dynamic_threshold'] = threshold
-
                         mode_tag = '🔴LIVE' if self.trading_mode == 'live' else '📋PAPER'
                         print(
                             f"🎯 [{mode_tag}] Signal: {signal.strategy} → "
                             f"{signal.city.title()} {signal.direction} "
                             f"{signal.outcome_label} @ ${signal.entry_price:.3f} "
-                            f"(conf={signal.confidence:.0%} | thresh={threshold:.0%})",
+                            f"(conf={signal.confidence:.0%})",
                             flush=True
                         )
 
                         trade = await self.active_trader.execute_signal(signal)
                         if trade:
-                            # Record in risk manager
-                            self.risk_manager.record_trade(
-                                size_usd=trade.get('size_usd', 0),
-                                city=city, is_open=True
-                            )
                             await self.bot.send_trade_alert(trade)
                             print(f"✅ Trade executed: {trade.get('city', '')} "
                                   f"{trade.get('outcome_label', '')}", flush=True)
@@ -428,16 +359,6 @@ class WeatherTradingEngine:
 
                 closed = await self.active_trader.check_positions(current_prices)
                 for trade in closed:
-                    # Record in ML modules
-                    pnl = trade.get('pnl', 0) or 0
-                    self.risk_manager.record_trade(
-                        pnl=pnl, size_usd=trade.get('size_usd', 0),
-                        city=trade.get('city', ''), is_open=False
-                    )
-                    self.confidence_calibrator.record_trade(
-                        trade.get('confidence', 0.5), pnl,
-                        trade.get('strategy', '')
-                    )
                     # Save forecast for accuracy tracking
                     if trade.get('city') and trade.get('target_date'):
                         forecast_temp = trade.get('metadata', {}).get('forecast_mean', 0)
@@ -447,10 +368,6 @@ class WeatherTradingEngine:
                                 forecast_temp, confidence=trade.get('confidence', 0)
                             )
                     await self.bot.send_close_alert(trade)
-
-                # Update risk manager with current balance
-                self.risk_manager.update_balance(self.active_trader.balance)
-                self.dynamic_threshold.set_session_pnl(self.risk_manager._daily_pnl)
 
                 # Log status
                 if scan_count <= 3 or scan_count % 20 == 0:
