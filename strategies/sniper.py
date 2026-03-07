@@ -51,7 +51,7 @@ from datetime import datetime, date, timedelta, timezone
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.config import Config
+from weather.config import Config
 
 
 class SniperStrategy:
@@ -342,7 +342,7 @@ class SniperStrategy:
         Fetch ACTUAL observed temperatures for today from Open-Meteo.
         This is KEY — not forecast, but REAL observed data.
         """
-        from weather_prediction.data.weather_client import WeatherClient
+        from weather.data.weather_client import WeatherClient
         wc = WeatherClient()
         city_info = wc.CITIES.get(city.lower().replace(' ', '-'))
         if not city_info:
@@ -399,7 +399,7 @@ class SniperStrategy:
                      certainty: float, price: float, expected_profit: float,
                      reason: str, city: str, event_id: str) -> Dict:
         """Create a standardized trade signal."""
-        from weather_prediction.strategies.base_strategy import TradeSignal
+        from weather.strategies.base_strategy import TradeSignal
 
         token_id = outcome.get('token_id_yes', '') if direction == 'YES' else outcome.get('token_id_no', '')
         title = outcome.get('group_item_title', '') or outcome.get('title', '')

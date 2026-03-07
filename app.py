@@ -29,20 +29,20 @@ if Config.PROXY_URL:
 else:
     print("🌐 No proxy configured (PROXY_URL not set)", flush=True)
 
-from weather_prediction.data.weather_client import WeatherClient
-from weather_prediction.data.weather_market_client import WeatherMarketClient
-from weather_prediction.data.clob_client import ClobClient
-from weather_prediction.data.database import Database
-from weather_prediction.strategies.sniper import SniperStrategy
-from weather_prediction.strategies.dynamic_picker import WeatherDynamicPicker
+from weather.data.weather_client import WeatherClient
+from weather.data.weather_market_client import WeatherMarketClient
+from weather.data.clob_client import ClobClient
+from weather.data.database import Database
+from weather.strategies.sniper import SniperStrategy
+from weather.strategies.dynamic_picker import WeatherDynamicPicker
 try:
-    from weather_prediction.ml.ml_strategy_engine import MLStrategyEngine
+    from weather.ml.ml_strategy_engine import MLStrategyEngine
     HAS_ML = True
 except ImportError:
     HAS_ML = False
-from weather_prediction.trading.paper_trader import PaperTrader
-from weather_prediction.trading.live_trader import LiveTrader
-from weather_prediction.bot.telegram_bot import TelegramBot
+from weather.trading.paper_trader import PaperTrader
+from weather.trading.live_trader import LiveTrader
+from weather.bot.telegram_bot import TelegramBot
 
 
 class WeatherTradingEngine:

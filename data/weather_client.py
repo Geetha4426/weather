@@ -319,7 +319,7 @@ class WeatherClient:
         # GFS gets 2.2x for NYC (NOAA = best for US)
         # ICON gets 2.5x for Munich (DWD = German model)
         try:
-            from weather_prediction.ml.model_weights import weighted_ensemble_mean
+            from weather.ml.model_weights import weighted_ensemble_mean
             mean_max, std_max = weighted_ensemble_mean(model_temps, city)
         except ImportError:
             # Fallback to equal weighting

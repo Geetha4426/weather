@@ -25,12 +25,12 @@ from datetime import date, datetime
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.dynamic_picker import WeatherDynamicPicker
-from weather_prediction.ml.bias_corrector import BiasCorrectionModel
-from weather_prediction.ml.bayesian_updater import BayesianUpdater
-from weather_prediction.ml.dynamic_threshold import DynamicThresholdEngine
-from weather_prediction.ml.price_momentum import PriceMomentumDetector
-from weather_prediction.config import Config
+from weather.strategies.dynamic_picker import WeatherDynamicPicker
+from weather.ml.bias_corrector import BiasCorrectionModel
+from weather.ml.bayesian_updater import BayesianUpdater
+from weather.ml.dynamic_threshold import DynamicThresholdEngine
+from weather.ml.price_momentum import PriceMomentumDetector
+from weather.config import Config
 
 
 class MLStrategyEngine:
@@ -87,7 +87,7 @@ class MLStrategyEngine:
                 0.98, forecast.get('confidence', 0.5) + correction['confidence_boost'])
 
             # Rebuild probability distribution with corrected values
-            from weather_prediction.data.weather_client import WeatherClient
+            from weather.data.weather_client import WeatherClient
             wc = WeatherClient()
             unit = forecast.get('unit', 'celsius')
             forecast['probability_distribution'] = wc._build_probability_distribution(
