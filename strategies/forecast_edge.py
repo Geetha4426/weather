@@ -25,9 +25,9 @@ from typing import Dict, List
 from datetime import date
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class ForecastEdgeStrategy(BaseStrategy):
@@ -73,6 +73,10 @@ class ForecastEdgeStrategy(BaseStrategy):
             # Calculate forecast probability for this outcome
             forecast_prob = self._get_outcome_probability(outcome, prob_dist)
 
+            # CRITICAL: Skip outcomes our forecast says are unlikely
+            if forecast_prob < Config.WEATHER_MIN_FORECAST_PROB:
+                continue
+
             # Get market price
             yes_token = outcome.get('token_id_yes', '')
             if not yes_token:
@@ -84,7 +88,7 @@ class ForecastEdgeStrategy(BaseStrategy):
             else:
                 market_price = outcome.get('price_yes', 0.5)
 
-            if market_price <= 0.005 or market_price >= 0.99:
+            if market_price < 0.04 or market_price >= 0.99:
                 continue
 
             # Calculate edge
@@ -93,13 +97,13 @@ class ForecastEdgeStrategy(BaseStrategy):
             if edge < self.min_edge:
                 continue
 
-            # Confidence scoring
+            # Confidence = anchored to actual forecast probability
+            # High forecast prob + good edge + good timing = high confidence
             time_factor = self._time_confidence(seconds_remaining)
-            edge_factor = min(1.0, edge / 0.30)
             confidence = (
-                model_confidence * 0.40 +
-                edge_factor * 0.35 +
-                time_factor * 0.25
+                forecast_prob * 0.50 +          # 50% = actual probability (the anchor)
+                model_confidence * 0.25 +        # 25% = model agreement
+                time_factor * 0.25               # 25% = time to resolution
             )
 
             if confidence < self.min_confidence:

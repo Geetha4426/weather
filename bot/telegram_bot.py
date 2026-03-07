@@ -24,8 +24,15 @@ from telegram.ext import (
 )
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.config import Config
+
+
+def _md_escape(text: str) -> str:
+    """Escape Telegram MarkdownV1 special characters in dynamic text."""
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, f'\\{ch}')
+    return text
 
 
 class TelegramBot:
@@ -56,6 +63,9 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("mode", self.cmd_mode))
         self.app.add_handler(CommandHandler("live", self.cmd_live))
         self.app.add_handler(CommandHandler("paper", self.cmd_paper))
+        self.app.add_handler(CommandHandler("risk", self.cmd_risk))
+        self.app.add_handler(CommandHandler("ml", self.cmd_ml))
+        self.app.add_handler(CommandHandler("calibration", self.cmd_calibration))
 
         # Callbacks
         self.app.add_handler(CallbackQueryHandler(self.cb_handler))
@@ -89,6 +99,9 @@ class TelegramBot:
             f"/balance — Check balance\n"
             f"/markets — Scan live markets\n"
             f"/history — Trade history\n"
+            f"/risk — Risk manager status\n"
+            f"/ml — ML module stats\n"
+            f"/calibration — Confidence calibration\n"
             f"/mode — Switch paper/live\n"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
@@ -137,6 +150,16 @@ class TelegramBot:
             f"Total P&L: ${summary['total_pnl']:+.4f}\n"
             f"Open: {len(positions)}\n"
         )
+
+        # ML stats
+        if hasattr(self.engine, 'risk_manager'):
+            rm = self.engine.risk_manager
+            msg += (
+                f"\n*Risk Manager:*\n"
+                f"  Daily P&L: ${rm.daily_pnl:+.2f}\n"
+                f"  Portfolio Heat: {rm.get_portfolio_heat():.0f}%\n"
+                f"  Circuit Breaker: {'🔴 TRIPPED' if rm.is_circuit_broken() else '🟢 OK'}\n"
+            )
 
         if positions:
             msg += "\n*Open Positions:*\n"
@@ -203,8 +226,8 @@ class TelegramBot:
             if forecast:
                 msg += (
                     f"📊 *Forecast: {forecast['city_name']}*\n"
-                    f"  Max: {forecast['max_temp_c']}°C | "
-                    f"Min: {forecast['min_temp_c']}°C\n\n"
+                    f"  Max: {forecast['max_temp']}{forecast['unit_symbol']} | "
+                    f"Min: {forecast['min_temp']}{forecast['unit_symbol']}\n\n"
                 )
 
         await update.message.reply_text(msg, parse_mode='Markdown')
@@ -228,9 +251,9 @@ class TelegramBot:
         msg = (
             f"🌡️ *Ensemble Forecast: {city.title()}*\n"
             f"Date: {ensemble['date']}\n\n"
-            f"Mean Max: {ensemble['mean_max']}°C\n"
-            f"Spread: ±{ensemble['std_max']}°C\n"
-            f"Range: {ensemble['min_forecast']}°C — {ensemble['max_forecast']}°C\n"
+            f"Mean Max: {ensemble['mean_max']}{ensemble.get('unit_symbol', '°C')}\n"
+            f"Spread: ±{ensemble['std_max']}{ensemble.get('unit_symbol', '°C')}\n"
+            f"Range: {ensemble['min_forecast']}{ensemble.get('unit_symbol', '°C')} — {ensemble['max_forecast']}{ensemble.get('unit_symbol', '°C')}\n"
             f"Models: {ensemble['num_models']}\n"
             f"Confidence: {ensemble['confidence']:.0%}\n\n"
             f"*Probability Distribution:*\n"
@@ -321,6 +344,126 @@ class TelegramBot:
         ok, msg = self.engine.switch_mode('paper')
         await update.message.reply_text(msg)
 
+    async def cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show risk manager status."""
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not ready")
+            return
+
+        rm = getattr(self.engine, 'risk_manager', None)
+        if not rm:
+            await update.message.reply_text("⚠️ Risk manager not initialized")
+            return
+
+        heat = rm.get_portfolio_heat()
+        max_heat = rm.max_portfolio_heat * 100
+        city_exposure = rm.city_exposure
+
+        msg = (
+            f"🛡️ *Risk Manager*\n\n"
+            f"Daily P&L: ${rm.daily_pnl:+.2f}\n"
+            f"Daily Trades: {rm.daily_trade_count}\n"
+            f"Circuit Breaker: {'🔴 TRIPPED' if rm.is_circuit_broken() else '🟢 OK'}\n"
+            f"Portfolio Heat: {heat:.0f}% / {max_heat:.0f}%\n"
+            f"Risk Mode: {rm.risk_mode}\n"
+            f"Fractional Kelly: {rm.fractional_kelly:.0%}\n\n"
+        )
+
+        if city_exposure:
+            msg += "*City Exposure:*\n"
+            for city, usd in sorted(city_exposure.items(), key=lambda x: -x[1]):
+                if usd > 0:
+                    msg += f"  {city.title()}: ${usd:.2f}\n"
+
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    async def cmd_ml(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show ML module statistics."""
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not ready")
+            return
+
+        msg = "🧠 *ML Intelligence Layer*\n\n"
+
+        # Bias corrector stats
+        bc = getattr(self.engine, 'bias_corrector', None)
+        if bc:
+            msg += "*Bias Corrector:*\n"
+            for city in Config.WEATHER_CITIES[:5]:
+                stats = bc.get_stats(city)
+                if stats['observations'] > 0:
+                    msg += f"  {city.title()}: MAE={stats['mae']:.1f}° ({stats['observations']} obs)\n"
+            if not any(bc.get_stats(c)['observations'] > 0 for c in Config.WEATHER_CITIES[:5]):
+                msg += "  No data yet\n"
+            msg += "\n"
+
+        # Momentum tracker
+        pm = getattr(self.engine, 'price_momentum', None)
+        if pm:
+            msg += "*Price Momentum:*\n"
+            active = sum(1 for v in pm.price_history.values() if len(v) > 1)
+            spikes = sum(1 for s in pm.spike_cooldown.values() if s > 0)
+            msg += f"  Tracked tokens: {active}\n"
+            msg += f"  Active spikes: {spikes}\n\n"
+
+        # Dynamic threshold
+        dt = getattr(self.engine, 'dynamic_threshold', None)
+        if dt:
+            msg += "*Dynamic Thresholds:*\n"
+            entry = dt.get_entry_threshold({})
+            exit_t = dt.get_exit_threshold({})
+            msg += f"  Entry: {entry*100:.1f}%\n"
+            msg += f"  Exit: {exit_t*100:.1f}%\n\n"
+
+        # Confidence calibrator
+        cc = getattr(self.engine, 'confidence_calibrator', None)
+        if cc:
+            total_samples = sum(len(b['actual']) for b in cc.bins.values())
+            msg += f"*Confidence Calibrator:*\n"
+            msg += f"  Training samples: {total_samples}\n"
+            if total_samples > 0:
+                score = cc.get_overconfidence_score()
+                msg += f"  Overconfidence: {score:+.2f}\n"
+
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    async def cmd_calibration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show confidence calibration curve."""
+        if not self.engine:
+            await update.message.reply_text("⚠️ Engine not ready")
+            return
+
+        cc = getattr(self.engine, 'confidence_calibrator', None)
+        if not cc:
+            await update.message.reply_text("⚠️ Calibrator not initialized")
+            return
+
+        msg = "📈 *Confidence Calibration*\n\n"
+        msg += "```\nPredicted → Actual  (n)\n"
+        msg += "─" * 28 + "\n"
+
+        for bin_key in sorted(cc.bins.keys()):
+            b = cc.bins[bin_key]
+            n = len(b['actual'])
+            if n == 0:
+                msg += f" {bin_key:>7s}   →  n/a     (0)\n"
+            else:
+                actual = sum(b['actual']) / n
+                bar = '█' * int(actual * 10)
+                msg += f" {bin_key:>7s}   → {actual:5.0%}  ({n:2d}) {bar}\n"
+
+        msg += "```\n"
+
+        score = cc.get_overconfidence_score()
+        if score > 0.05:
+            msg += f"\n⚠️ Overconfident by {score:.0%} — thresholds tightened"
+        elif score < -0.05:
+            msg += f"\n✅ Underconfident by {abs(score):.0%} — thresholds relaxed"
+        else:
+            msg += f"\n✅ Well-calibrated (drift: {score:+.0%})"
+
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
     # ═══════════════════════════════════════════════════════════════════
     # CALLBACKS
     # ═══════════════════════════════════════════════════════════════════
@@ -354,17 +497,24 @@ class TelegramBot:
                 text=text,
                 parse_mode='Markdown'
             )
-        except Exception as e:
-            print(f"⚠️ Telegram send error: {e}", flush=True)
+        except Exception:
+            # Markdown parse failed — retry as plain text
+            try:
+                await self.app.bot.send_message(
+                    chat_id=Config.TELEGRAM_CHAT_ID,
+                    text=text
+                )
+            except Exception as e2:
+                print(f"⚠️ Telegram send error: {e2}", flush=True)
 
     async def send_trade_alert(self, trade: dict):
         """Send trade execution notification."""
         direction = trade.get('direction', 'YES')
-        city = trade.get('city', '').title()
-        label = trade.get('outcome_label', '')
+        city = _md_escape(trade.get('city', '').title())
+        label = _md_escape(trade.get('outcome_label', ''))
         price = trade.get('entry_price', 0)
         size = trade.get('size_usd', 0)
-        strategy = trade.get('strategy', '')
+        strategy = _md_escape(trade.get('strategy', ''))
 
         msg = (
             f"🌡️ *TRADE: {direction}*\n\n"
@@ -381,12 +531,16 @@ class TelegramBot:
         pnl = trade.get('pnl', 0) or 0
         emoji = '✅' if pnl >= 0 else '❌'
 
+        city = _md_escape(trade.get('city', '').title())
+        label = _md_escape(trade.get('outcome_label', ''))
+        reason = _md_escape(trade.get('exit_reason', ''))
+
         msg = (
             f"{emoji} *CLOSED*\n\n"
-            f"City: {trade.get('city', '').title()}\n"
-            f"Outcome: {trade.get('outcome_label', '')}\n"
+            f"City: {city}\n"
+            f"Outcome: {label}\n"
             f"P&L: ${pnl:+.4f} ({trade.get('pnl_pct', 0):+.1f}%)\n"
-            f"Reason: {trade.get('exit_reason', '')}"
+            f"Reason: {reason}"
         )
         await self.send_message(msg)
 

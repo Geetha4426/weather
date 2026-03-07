@@ -15,7 +15,7 @@ import time
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from weather_prediction.config import Config
+from weather.config import Config
 
 # ═══════════════════════════════════════════════════════════════════
 # PROXY SETUP — must happen BEFORE any HTTP requests
@@ -33,6 +33,7 @@ from weather_prediction.data.weather_client import WeatherClient
 from weather_prediction.data.weather_market_client import WeatherMarketClient
 from weather_prediction.data.clob_client import ClobClient
 from weather_prediction.data.database import Database
+from weather_prediction.strategies.sniper import SniperStrategy
 from weather_prediction.strategies.dynamic_picker import WeatherDynamicPicker
 try:
     from weather_prediction.ml.ml_strategy_engine import MLStrategyEngine
@@ -61,15 +62,17 @@ class WeatherTradingEngine:
         # Active mode
         self.trading_mode = Config.TRADING_MODE
 
-        # Strategy — ML engine with fallback to base picker
+        # Strategy — SNIPER is PRIMARY (high win rate, few trades)
+        # ML engine is fallback for earlier-than-resolution-day analysis
+        self.sniper = SniperStrategy()
         if HAS_ML:
-            self.strategy = MLStrategyEngine()
-            self.ml_engine = self.strategy
-            print("🧠 ML Strategy Engine loaded (bias correction, Bayesian, momentum)", flush=True)
+            self.ml_engine = MLStrategyEngine()
+            print("🎯 Sniper Strategy PRIMARY + 🧠 ML Engine backup loaded", flush=True)
         else:
-            self.strategy = WeatherDynamicPicker()
             self.ml_engine = None
-            print("📋 Base strategy loaded (ML not available — install scikit-learn)", flush=True)
+            print("🎯 Sniper Strategy PRIMARY loaded (ML not available)", flush=True)
+
+        self.strategy = self.sniper  # Sniper is always primary
 
         # Telegram bot
         self.bot = TelegramBot(engine=self)
@@ -103,6 +106,11 @@ class WeatherTradingEngine:
         Config.print_status()
         await self.db.init()
 
+        # Initialize ML modules
+        await self.bias_corrector.init(self.db)
+        await self.confidence_calibrator.init(self.db)
+        print("🧠 ML modules initialized (bias, bayesian, calibrator, momentum, thresholds, risk)", flush=True)
+
         # Check Polymarket geoblock
         try:
             import requests
@@ -130,15 +138,42 @@ class WeatherTradingEngine:
             print("📋 Paper trading only (no live credentials)", flush=True)
             self.trading_mode = 'paper'
 
-        # Calibrate forecasts with historical data
-        print("📊 Calibrating forecast bias...", flush=True)
+        # Calibrate forecasts with historical data + ML bias correction
+        print("📊 Calibrating forecast bias (ML-enhanced)...", flush=True)
         for city in Config.WEATHER_CITIES:
             accuracy = self.weather_client.get_historical_accuracy(city)
             if accuracy:
-                print(f"  {city.title()}: bias={accuracy['bias']:+.1f}°C, "
-                      f"MAE={accuracy['mae']:.1f}°C ({accuracy['days']} days)", flush=True)
+                unit_sym = '°F' if self.weather_client.get_city_unit(city) == 'fahrenheit' else '°C'
+                print(f"  {city.title()}: bias={accuracy['bias']:+.1f}{unit_sym}, "
+                      f"MAE={accuracy['mae']:.1f}{unit_sym} ({accuracy['days']} days)", flush=True)
+                # Feed historical data to ML bias corrector
+                for fc_temp, actual in [(p[1], p[2]) for p in accuracy.get('pairs', [])]:
+                    await self.bias_corrector.record(
+                        city, accuracy.get('pairs', [['']])[0][0] if accuracy.get('pairs') else '',
+                        fc_temp, actual
+                    )
+                # Feed accuracy to dynamic threshold engine
+                self.dynamic_threshold.set_city_accuracy(city, accuracy['mae'])
             else:
                 print(f"  {city.title()}: no historical data yet", flush=True)
+
+        # Initialize risk manager with starting balance
+        balance = self.active_trader.balance if hasattr(self.active_trader, 'balance') else Config.STARTING_BALANCE
+        self.risk_manager.set_starting_balance(balance)
+
+        # Restore open positions from database
+        try:
+            open_trades = await self.db.get_open_trades()
+            if open_trades:
+                trader = self.active_trader
+                for t in open_trades:
+                    trade_id = t.get('id', '')
+                    if trade_id and trade_id not in trader.positions:
+                        trader.positions[trade_id] = t
+                if open_trades:
+                    print(f"♻️ Restored {len(open_trades)} open positions from database", flush=True)
+        except Exception as e:
+            print(f"⚠️ Could not restore positions: {e}", flush=True)
 
         # Setup Telegram bot
         if Config.TELEGRAM_BOT_TOKEN:
@@ -159,10 +194,24 @@ class WeatherTradingEngine:
         self._scan_task = asyncio.create_task(self._scan_loop())
 
     async def stop(self):
-        """Stop trading."""
+        """Stop trading and clean up pending orders."""
         self.is_running = False
         if self._scan_task:
             self._scan_task.cancel()
+
+        # Cancel pending GTC orders on shutdown
+        if self.live_trader.is_ready and self.live_trader.pending_orders:
+            print(f"🧹 Cancelling {len(self.live_trader.pending_orders)} pending orders...", flush=True)
+            for trade_id, order in list(self.live_trader.pending_orders.items()):
+                try:
+                    order_id = order.get('order_id', '')
+                    if order_id:
+                        self.live_trader.clob_client.cancel(order_id)
+                        self.live_trader.balance += order.get('size_usd', 0)
+                except Exception:
+                    pass
+            self.live_trader.pending_orders.clear()
+
         print("⏹️ Weather trading stopped", flush=True)
 
     async def _scan_loop(self):
@@ -219,6 +268,34 @@ class WeatherTradingEngine:
 
                     seconds_remaining = self.weather_markets.get_seconds_until_resolution(market)
 
+                    # ═══ ML ENHANCEMENT: Apply bias correction to forecast ═══
+                    raw_mean = forecast.get('mean_max', 0)
+                    corrected_mean = self.bias_corrector.correct(city, raw_mean)
+                    if abs(corrected_mean - raw_mean) > 0.1:
+                        forecast['mean_max'] = corrected_mean
+                        forecast['bias_correction'] = round(raw_mean - corrected_mean, 2)
+                        # Rebuild probability distribution with corrected mean
+                        if hasattr(self.weather_client, '_build_probability_distribution'):
+                            forecast['probability_distribution'] = \
+                                self.weather_client._build_probability_distribution(
+                                    corrected_mean, forecast.get('std_max', 1.0),
+                                    forecast.get('unit', 'celsius')
+                                )
+
+                    # ═══ ML ENHANCEMENT: Set Bayesian prior from ensemble ═══
+                    prob_dist = forecast.get('probability_distribution', {})
+                    if prob_dist:
+                        self.bayesian_updater.set_prior(city, target_date_str, prob_dist)
+
+                    # ═══ ML ENHANCEMENT: Track prices for momentum signals ═══
+                    for outcome in market.get('outcomes', []):
+                        yes_token = outcome.get('token_id_yes', '')
+                        if yes_token:
+                            self.price_momentum.record_price(
+                                yes_token, outcome.get('price_yes', 0),
+                                outcome.get('volume_24h', 0)
+                            )
+
                     context = {
                         'clob': self.clob,
                         'weather_client': self.weather_client,
@@ -235,7 +312,7 @@ class WeatherTradingEngine:
                             print(f"❌ Strategy error: {e}", flush=True)
                         continue
 
-                    # Execute signals
+                    # Execute signals (ML-enhanced with risk controls)
                     for signal in signals:
                         if not self.is_running:
                             break
@@ -248,17 +325,88 @@ class WeatherTradingEngine:
                         if event_positions >= Config.WEATHER_MAX_POSITIONS_PER_EVENT:
                             continue
 
+                        # ═══ Skip junk: don't buy outcomes priced below minimum ═══
+                        if signal.entry_price < Config.WEATHER_MIN_MARKET_PRICE:
+                            continue
+
+                        # ═══ Skip low-probability: don't bet on unlikely outcomes ═══
+                        forecast_prob = signal.metadata.get('forecast_prob', 0)
+                        if signal.direction == 'YES' and forecast_prob < Config.WEATHER_MIN_FORECAST_PROB:
+                            continue
+                        # For NO trades: the forecast_prob is the prob of the YES side
+                        # Low forecast_prob + high market price = good NO trade (overpriced tail)
+                        # So we check that the NO side probability is high enough
+                        if signal.direction == 'NO' and (1.0 - forecast_prob) < Config.WEATHER_MIN_FORECAST_PROB:
+                            continue
+
+                        # ═══ ML: Risk manager pre-trade check ═══
+                        trade_size = min(Config.WEATHER_MAX_POSITION_USD,
+                                        self.active_trader.balance * Config.WEATHER_POSITION_SIZE_PCT / 100)
+                        can_trade, risk_reason = self.risk_manager.can_trade(
+                            city, trade_size, self.active_trader.balance
+                        )
+                        if not can_trade:
+                            if scan_count <= 3:
+                                print(f"🛡️ Risk block: {risk_reason}", flush=True)
+                            continue
+
+                        # ═══ ML: Correlation check ═══
+                        open_positions = self.active_trader.get_open_positions()
+                        corr_ok, corr_reason = self.risk_manager.check_correlation(
+                            city, signal.direction, open_positions
+                        )
+                        if not corr_ok:
+                            continue
+
+                        # ═══ ML: Calibrate confidence ═══
+                        raw_conf = signal.confidence
+                        signal.confidence = self.confidence_calibrator.calibrate(
+                            raw_conf, signal.strategy
+                        )
+
+                        # ═══ ML: Price momentum adjustment ═══
+                        momentum_adj = self.price_momentum.get_momentum_adjustment(signal.token_id)
+                        signal.confidence *= momentum_adj
+
+                        # ═══ ML: Check if we should delay (spike detection) ═══
+                        should_delay, delay_reason = self.price_momentum.should_delay_entry(signal.token_id)
+                        if should_delay:
+                            if scan_count <= 5:
+                                print(f"⏳ Delay: {delay_reason}", flush=True)
+                            continue
+
+                        # ═══ ML: Dynamic threshold check ═══
+                        edge = signal.metadata.get('edge', signal.confidence - signal.entry_price)
+                        should_enter, threshold, thresh_reason = self.dynamic_threshold.should_enter(
+                            edge, city, seconds_remaining,
+                            forecast.get('std_max', 2.0),
+                            liquidity=market.get('outcomes', [{}])[0].get('liquidity', 0),
+                            spread=market.get('outcomes', [{}])[0].get('spread', 0),
+                            forecast_unit=forecast.get('unit', 'celsius'),
+                        )
+                        if not should_enter:
+                            continue
+
+                        signal.metadata['ml_calibrated_conf'] = signal.confidence
+                        signal.metadata['momentum_adj'] = momentum_adj
+                        signal.metadata['dynamic_threshold'] = threshold
+
                         mode_tag = '🔴LIVE' if self.trading_mode == 'live' else '📋PAPER'
                         print(
                             f"🎯 [{mode_tag}] Signal: {signal.strategy} → "
                             f"{signal.city.title()} {signal.direction} "
                             f"{signal.outcome_label} @ ${signal.entry_price:.3f} "
-                            f"(conf={signal.confidence:.0%})",
+                            f"(conf={signal.confidence:.0%} | thresh={threshold:.0%})",
                             flush=True
                         )
 
                         trade = await self.active_trader.execute_signal(signal)
                         if trade:
+                            # Record in risk manager
+                            self.risk_manager.record_trade(
+                                size_usd=trade.get('size_usd', 0),
+                                city=city, is_open=True
+                            )
                             await self.bot.send_trade_alert(trade)
                             print(f"✅ Trade executed: {trade.get('city', '')} "
                                   f"{trade.get('outcome_label', '')}", flush=True)
@@ -280,7 +428,29 @@ class WeatherTradingEngine:
 
                 closed = await self.active_trader.check_positions(current_prices)
                 for trade in closed:
+                    # Record in ML modules
+                    pnl = trade.get('pnl', 0) or 0
+                    self.risk_manager.record_trade(
+                        pnl=pnl, size_usd=trade.get('size_usd', 0),
+                        city=trade.get('city', ''), is_open=False
+                    )
+                    self.confidence_calibrator.record_trade(
+                        trade.get('confidence', 0.5), pnl,
+                        trade.get('strategy', '')
+                    )
+                    # Save forecast for accuracy tracking
+                    if trade.get('city') and trade.get('target_date'):
+                        forecast_temp = trade.get('metadata', {}).get('forecast_mean', 0)
+                        if forecast_temp:
+                            await self.db.save_forecast(
+                                trade['city'], trade['target_date'],
+                                forecast_temp, confidence=trade.get('confidence', 0)
+                            )
                     await self.bot.send_close_alert(trade)
+
+                # Update risk manager with current balance
+                self.risk_manager.update_balance(self.active_trader.balance)
+                self.dynamic_threshold.set_session_pnl(self.risk_manager._daily_pnl)
 
                 # Log status
                 if scan_count <= 3 or scan_count % 20 == 0:

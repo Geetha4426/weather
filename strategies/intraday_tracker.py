@@ -31,9 +31,9 @@ from typing import Dict, List, Optional
 from datetime import datetime, date, timedelta, timezone
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class IntradayTrackerStrategy(BaseStrategy):
@@ -135,10 +135,14 @@ class IntradayTrackerStrategy(BaseStrategy):
             yes_token = outcome.get('token_id_yes', '')
             no_token = outcome.get('token_id_no', '')
 
-            # ═══ CASE 1: Running max already EXCEEDS this boundary ═══
-            # e.g., "14°C or higher" and running max is already 15°C
+            # Skip junk-priced outcomes
+            if market_price < 0.04:
+                continue
+
+            # ═══ CASE 1: Upper bound outcomes ═══
             if outcome.get('is_upper_bound'):
                 if running_max >= temp_low and market_price < 0.90:
+                    # Running max already EXCEEDS this boundary → near-certain YES
                     edge = 1.0 - market_price
                     if edge > 0.05 and yes_token:
                         signals.append(self._make_signal(
@@ -148,11 +152,8 @@ class IntradayTrackerStrategy(BaseStrategy):
                             f"Market at {market_price:.0%}, should be ~100%",
                             'intraday_locked', running_max, unit_sym
                         ))
-
-            # ═══ CASE 2: Running max already BELOW this boundary ═══
-            # e.g., "46°F or higher" and running max is 43°F with peak passed
-            elif outcome.get('is_upper_bound'):
-                if running_max < temp_low - 2 and max_confidence > 0.80 and market_price > 0.15:
+                elif running_max < temp_low - 2 and max_confidence > 0.80 and market_price > 0.15:
+                    # Running max well BELOW this boundary with peak passed → likely NO
                     if no_token:
                         signals.append(self._make_signal(
                             outcome, city, target_date_str, no_token,
@@ -207,6 +208,8 @@ class IntradayTrackerStrategy(BaseStrategy):
                      confidence, edge, rationale, sig_type, running_max,
                      unit_sym, direction='YES'):
         label = outcome.get('label', '')
+        # For intraday, forecast_prob is the confidence itself (based on actual data)
+        forecast_prob = confidence
         return TradeSignal(
             strategy=self.name, city=city, target_date=date_str,
             direction=direction, outcome_label=label,
@@ -219,6 +222,7 @@ class IntradayTrackerStrategy(BaseStrategy):
             metadata={
                 'type': sig_type, 'edge': edge,
                 'running_max': running_max, 'unit': unit_sym,
+                'forecast_prob': forecast_prob,
             },
         )
 

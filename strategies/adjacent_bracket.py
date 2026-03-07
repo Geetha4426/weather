@@ -30,9 +30,9 @@ RISK MANAGEMENT:
 from typing import Dict, List
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class AdjacentBracketStrategy(BaseStrategy):
@@ -89,11 +89,14 @@ class AdjacentBracketStrategy(BaseStrategy):
                     continue
 
                 forecast_prob = self._get_prob(o, prob_dist)
-                if forecast_prob < 0.05:  # Too unlikely
+                if forecast_prob < 0.08:  # Each bracket must have real probability
                     continue
 
                 book = clob.get_orderbook(yes_token)
                 market_price = book['best_ask'] if book and not book.get('_synthetic') else o.get('price_yes', 0.5)
+
+                if market_price < 0.04:  # Skip junk outcomes
+                    continue
 
                 core_outcomes.append({
                     'outcome': o,
@@ -118,22 +121,26 @@ class AdjacentBracketStrategy(BaseStrategy):
         total_cost = sum(b['market_price'] for b in brackets)
         total_forecast_prob = sum(b['forecast_prob'] for b in brackets)
 
-        # Only proceed if there's positive expected value
-        # EV = (prob of winning) * $1 - total_cost
+        # Only proceed if brackets cover >50% of forecast probability
+        # This means our forecast says there's >50% chance one of these wins
+        if total_forecast_prob < 0.50:
+            return []
+
+        # EV = probability one wins × $1 payout - total cost
         expected_value = total_forecast_prob * 1.0 - total_cost
 
         if expected_value < 0.10:  # Need at least 10% positive EV
             return []
 
-        # Check that total cost is reasonable
-        if total_cost > 0.75:  # Don't overpay
+        # Check that total cost is reasonable (max 70% of expected payout)
+        if total_cost > total_forecast_prob * 0.70:
             return []
 
         ev_pct = expected_value / total_cost * 100
 
         # Confidence based on coverage and forecast quality
-        coverage = total_forecast_prob  # How much of the probability we cover
-        confidence = min(0.90, forecast.get('confidence', 0.5) * 0.5 + coverage * 0.5)
+        # Anchored to total_forecast_prob (how likely we are to win)
+        confidence = min(0.90, total_forecast_prob * 0.70 + forecast.get('confidence', 0.5) * 0.30)
 
         # Time bonus: closer to resolution, forecast is more reliable
         hours = seconds_remaining / 3600

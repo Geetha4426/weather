@@ -1,5 +1,5 @@
-"""Allow running as: python -m weather_prediction"""
-from weather_prediction.app import main
+"""Allow running as: python -m weather"""
+from weather.app import main
 import asyncio
 
 if __name__ == '__main__':

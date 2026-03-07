@@ -24,9 +24,9 @@ import math
 from typing import Dict, List
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class ConvergenceStrategy(BaseStrategy):
@@ -84,10 +84,12 @@ class ConvergenceStrategy(BaseStrategy):
                 best_prob = fp
                 best_outcome = o
 
-        if not best_outcome or best_prob < 0.15:
+        if not best_outcome or best_prob < 0.20:
             return []
 
         market_price = best_outcome.get('price_yes', 0.5)
+        if market_price < 0.04:
+            return []
         edge = best_prob - market_price
 
         if edge < 0.08:  # Lower threshold for convergence (since we scale in)
@@ -103,8 +105,8 @@ class ConvergenceStrategy(BaseStrategy):
         # Kelly Criterion sizing
         kelly_fraction = self._kelly_criterion(best_prob, entry)
 
-        # Scale confidence by time multiplier
-        confidence = min(0.95, model_confidence * 0.5 + edge * 2.0)
+        # Scale confidence by time multiplier — anchored to forecast probability
+        confidence = min(0.95, best_prob * 0.50 + model_confidence * 0.25 + edge * 1.0)
         confidence = min(0.98, confidence * time_multiplier)
 
         unit_sym = forecast.get('unit_symbol', '°C')
@@ -163,8 +165,10 @@ class ConvergenceStrategy(BaseStrategy):
                 second_prob = fp
                 second_best = o
 
-        if second_best and second_prob > 0.15:
+        if second_best and second_prob > 0.20:
             second_price = second_best.get('price_yes', 0.5)
+            if second_price < 0.04:
+                return signals
             second_edge = second_prob - second_price
             second_token = second_best.get('token_id_yes', '')
 

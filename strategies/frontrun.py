@@ -27,9 +27,9 @@ import json
 from typing import Dict, List, Optional
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.strategies.base_strategy import BaseStrategy, TradeSignal
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.strategies.base_strategy import BaseStrategy, TradeSignal
+from weather.config import Config
 
 
 class FrontrunStrategy(BaseStrategy):
@@ -132,11 +132,19 @@ class FrontrunStrategy(BaseStrategy):
 
             market_price = outcome.get('price_yes', 0.5)
 
+            # Skip junk-priced outcomes
+            if market_price < 0.04:
+                continue
+
             # BUY outcomes whose probability INCREASED significantly
             # (market hasn't caught up yet)
             if prob_change > 0.08 and current_p > market_price:
                 edge = current_p - market_price
                 if edge < 0.10:
+                    continue
+
+                # Must have meaningful forecast probability
+                if current_p < 0.10:
                     continue
 
                 yes_token = outcome.get('token_id_yes', '')
@@ -146,9 +154,9 @@ class FrontrunStrategy(BaseStrategy):
                 book = clob.get_orderbook(yes_token)
                 entry = book['best_ask'] if book and not book.get('_synthetic') else market_price
 
-                # Higher confidence for larger shifts
+                # Confidence anchored to forecast probability
                 shift_magnitude = abs(shift)
-                confidence = min(0.90, 0.60 + shift_magnitude * 0.10 + prob_change * 0.5)
+                confidence = min(0.90, current_p * 0.50 + shift_magnitude * 0.10 + prob_change * 0.5)
 
                 unit_sym = outcome.get('temp_unit', 'c').upper()
                 label = outcome.get('label', f'{temp_low}°{unit_sym}')
@@ -179,6 +187,7 @@ class FrontrunStrategy(BaseStrategy):
                         'current_mean': current_mean,
                         'prev_prob': prev_p,
                         'current_prob': current_p,
+                        'forecast_prob': current_p,
                         'market_price': market_price,
                         'edge': edge,
                         'time_since_shift': time_since,
@@ -191,6 +200,11 @@ class FrontrunStrategy(BaseStrategy):
                 if not no_token:
                     continue
 
+                # Must have meaningful NO probability
+                no_prob = 1.0 - current_p
+                if no_prob < 0.10:
+                    continue
+
                 no_price = outcome.get('price_no', 1.0 - market_price)
                 book = clob.get_orderbook(no_token)
                 entry = book['best_ask'] if book and not book.get('_synthetic') else no_price
@@ -199,7 +213,8 @@ class FrontrunStrategy(BaseStrategy):
                     continue
 
                 overprice = market_price - current_p
-                confidence = min(0.85, 0.55 + abs(prob_change) * 0.5)
+                # Confidence anchored to NO probability
+                confidence = min(0.85, no_prob * 0.50 + abs(prob_change) * 0.5)
 
                 label = outcome.get('label', f'{temp_low}°')
 
@@ -220,6 +235,7 @@ class FrontrunStrategy(BaseStrategy):
                         'type': 'frontrun_short',
                         'prob_change': prob_change,
                         'overprice': overprice,
+                        'forecast_prob': no_prob,
                     },
                 ))
 

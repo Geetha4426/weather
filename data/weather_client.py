@@ -21,8 +21,8 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, date, timedelta, timezone
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from weather_prediction.config import Config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from weather.config import Config
 
 
 class WeatherClient:
