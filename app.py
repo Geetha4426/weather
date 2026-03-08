@@ -210,6 +210,7 @@ class WeatherTradingEngine:
         print("🔄 Weather scan loop started", flush=True)
         scan_count = 0
         _last_pnl_report = time.time()
+        _current_interval = Config.WEATHER_SCAN_INTERVAL
 
         while self.is_running:
             try:
@@ -365,7 +366,25 @@ class WeatherTradingEngine:
                     positions = self.active_trader.get_open_positions()
                     await self.bot.send_pnl_report(summary, positions)
 
-                await asyncio.sleep(Config.WEATHER_SCAN_INTERVAL)
+                # ═══ Dynamic scan interval (Improvement 5) ═══
+                min_seconds = min(
+                    (self.weather_markets.get_seconds_until_resolution(m) for m in markets),
+                    default=999999
+                )
+                min_hours = min_seconds / 3600
+                if min_hours < 6:
+                    _current_interval = Config.WEATHER_SCAN_INTERVAL_FAST   # 30s
+                elif min_hours < 12:
+                    _current_interval = Config.WEATHER_SCAN_INTERVAL_MED    # 60s
+                elif min_hours < 36:
+                    _current_interval = Config.WEATHER_SCAN_INTERVAL        # 120s
+                else:
+                    _current_interval = Config.WEATHER_SCAN_INTERVAL_SLOW   # 300s
+
+                if scan_count <= 3:
+                    print(f"⏱️ Scan interval: {_current_interval}s (closest resolution: {min_hours:.0f}h)", flush=True)
+
+                await asyncio.sleep(_current_interval)
 
             except asyncio.CancelledError:
                 break

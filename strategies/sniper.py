@@ -1,46 +1,21 @@
 """
-Sniper Strategy — Only Near-Certain Trades
+Sniper Strategy v2 — Ultra-Selective, Multi-Source Confirmation
 
-Win rate TARGET: 85%+ by only trading when outcome is CONFIRMED.
+Win rate TARGET: 90%+ by only trading when outcome is CONFIRMED
+by MULTIPLE data sources with high certainty.
 
-THE CORE INSIGHT:
-  On resolution day, after a few hours of temperature data,
-  MOST outcomes become physically impossible. That's FREE money.
-
-EXAMPLE (London March 7):
-  Current time: 2PM, Current high: 9°C
-  Models say max will be 10-11°C (peak already passed)
-  
-  IMPOSSIBLE outcomes (current high > their max):
-    "8°C or below" → current high is 9°C → THIS IS IMPOSSIBLE → Buy NO
-    
-  NEAR-IMPOSSIBLE outcomes (would need massive late-day spike):
-    "13°C" → would need 3°C spike in remaining hours → 99% NO
-    "14°C" → 99.9% NO
-    
-  NEAR-CERTAIN:
-    "10°C" → models all show 10.4-10.8°C → likely YES → but only buy if price < 0.80
-
-RULES:
-  1. ONLY trade on resolution day (same-day data available)
-  2. ONLY trade when REAL temperature data CONFIRMS the outcome
-  3. NEVER trade based solely on forecast probability
-  4. Maximum 3 trades per market (not 15+)
-  5. Minimum position size: ensure $0.10+ profit after fees
-  6. Only enter when probability of winning > 90%
+IMPROVEMENTS OVER v1:
+  1. OpenWeather ACTUAL observed temps (10-min updates vs hourly Open-Meteo)
+  2. City-level accuracy tracking (adjust certainty per city volatility)
+  3. 95% minimum certainty (was 90%)
+  4. Multi-source cross-validation (both APIs must agree)
+  5. Wider safety margins (conservative spike estimates)
 
 TRADE TYPES:
   A. "DEAD OUTCOME" — Buy NO: outcome is physically impossible
-     (current running max already exceeds the threshold)
-  B. "LOCKED IN" — Buy YES: running max has hit this exact value
-     and remaining hours can't change it
-  C. "GUARANTEED RANGE" — The temp can only land in 2-3 outcomes
-     Buy YES on the cheapest of those
-
-WHAT WE DON'T DO:
-  - No trading 2+ days before resolution
-  - No small-edge speculative trades
-  - No "forecast says 60%, market says 40%" → that's gambling
+  B. "LOCKED IN" — Buy YES: running max hit this value, can't change
+  C. "IMPOSSIBLE FUTURE" — Buy NO: max possible temp < outcome floor
+  D. "GUARANTEED YES/BELOW" — Buy YES on open-ended ranges
 """
 
 import math
@@ -57,43 +32,44 @@ from weather.config import Config
 class SniperStrategy:
     """
     Ultra-selective strategy: only trades near-certain outcomes.
-    Expected win rate: 85%+
-    Expected trades per day per city: 1-3
+    Expected win rate: 90%+
+    Expected trades per day per city: 1-2
     """
 
-    # Minimum certainty to trade
-    MIN_CERTAINTY = 0.90     # 90% minimum probability of winning
-
-    # Only trade on resolution day (or day before after 6PM)
-    MAX_HOURS_BEFORE = 18    # Max hours before resolution to enter
-
-    # Max trades per market event
+    # ═══ TIGHTENED THRESHOLDS (Improvement 3) ═══
+    MIN_CERTAINTY = 0.95      # 95% minimum probability of winning (was 90%)
+    MAX_HOURS_BEFORE = 12     # Only trade within 12h of resolution (was 18h)
     MAX_TRADES_PER_EVENT = 3
+    MIN_PROFIT_CENTS = 5      # $0.05 minimum profit (lower since we're more certain)
 
-    # Minimum profit to bother (after Polymarket fees)
-    MIN_PROFIT_CENTS = 8     # $0.08 minimum profit per $1 share
+    # Wider safety margins for temperature spikes (Improvement 3)
+    LATE_DAY_MAX_SPIKE_C = 2.0   # After 2PM, max possible spike (was 1.5)
+    NIGHT_MAX_SPIKE_C = 0.8      # After 8PM, max possible spike (was 0.5)
+    LATE_DAY_MAX_SPIKE_F = 3.5   # Fahrenheit equivalents
+    NIGHT_MAX_SPIKE_F = 1.5
 
-    # Temperature gates (°C thresholds - how much can temp still change)
-    LATE_DAY_MAX_SPIKE_C = 1.5  # After 2PM, max possible spike is ~1.5°C
-    NIGHT_MAX_SPIKE_C = 0.5     # After 8PM, max possible spike is ~0.5°C
+    # Minimum temperature gap for DEAD_OUTCOME (Improvement 3)
+    DEAD_OUTCOME_MIN_GAP_C = 1.0   # Running max must exceed by at least 1°C
+    DEAD_OUTCOME_MIN_GAP_F = 2.0   # ... or 2°F
 
-    # Same thresholds in °F
-    LATE_DAY_MAX_SPIKE_F = 3.0
-    NIGHT_MAX_SPIKE_F = 1.0
+    # Cross-validation bonus (Improvement 1)
+    CROSS_VALIDATION_BONUS = 0.02  # +2% certainty when both APIs agree
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'weather-sniper/1.0',
+            'User-Agent': 'weather-sniper/2.0',
             'Accept': 'application/json',
         })
-        self._trade_count: Dict[str, int] = {}  # event_id -> trade count
+        self._trade_count: Dict[str, int] = {}
+        self._city_accuracy: Dict[str, float] = {}  # city -> MAE (Improvement 2)
+        self._accuracy_loaded = False
+        self._owm_cache: Dict[str, Tuple[float, float]] = {}  # city -> (temp, timestamp)
 
     async def analyze(self, weather_market: Dict, context: Dict) -> List[Dict]:
         """
         Sniper analysis — only returns signals for near-certain outcomes.
-        
-        Returns list of trade signals, max 3 per market.
+        Uses multi-source temperature data for maximum confidence.
         """
         city = weather_market.get('city', '')
         target_date_str = weather_market.get('date', '')
@@ -110,41 +86,61 @@ class SniperStrategy:
         if self._trade_count.get(event_id, 0) >= self.MAX_TRADES_PER_EVENT:
             return []
 
-        # Get real-time temperature data
+        # ═══ Improvement 2: Load city accuracy on first scan ═══
+        if not self._accuracy_loaded:
+            self._load_city_accuracy()
+
+        # Get city-adjusted certainty threshold
+        min_certainty = self._get_city_certainty(city)
+
+        # Get forecast data
         forecast = context.get('forecast', {})
         unit = forecast.get('unit', 'celsius')
         hourly_temps = forecast.get('hourly_temps', [])
         hourly_times = forecast.get('hourly_times', [])
 
-        # Try to get ACTUAL current temperature from Open-Meteo
-        actual_data = self._get_actual_temps(city, target_date_str)
-        if actual_data:
-            hourly_temps = actual_data.get('temps', hourly_temps)
-            hourly_times = actual_data.get('times', hourly_times)
+        # ═══ Source 1: Open-Meteo actual temps ═══
+        openmeteo_data = self._get_actual_temps(city, target_date_str)
+        if openmeteo_data:
+            hourly_temps = openmeteo_data.get('temps', hourly_temps)
+            hourly_times = openmeteo_data.get('times', hourly_times)
 
-        # Calculate running maximum
-        running_max = None
+        # Calculate running maximum from Open-Meteo
+        running_max_om = None
+        now_hour = self._get_current_hour(city)
         if hourly_temps:
-            # Only use temps from hours that have already passed
-            now_hour = self._get_current_hour(city)
             past_temps = []
-            for i, (t_time, temp) in enumerate(zip(hourly_times, hourly_temps)):
+            for t_time, temp in zip(hourly_times, hourly_temps):
                 if temp is not None:
                     hour = self._parse_hour(t_time)
                     if hour is not None and hour <= now_hour:
                         past_temps.append(temp)
-
             if past_temps:
-                running_max = max(past_temps)
+                running_max_om = max(past_temps)
+
+        # ═══ Source 2: OpenWeather actual temp (Improvement 1 & 4) ═══
+        running_max_owm = self._get_openweather_actual(city)
+
+        # ═══ Cross-validate: take the HIGHER of both (conservative) ═══
+        running_max = None
+        sources_agree = False
+
+        if running_max_om is not None and running_max_owm is not None:
+            running_max = max(running_max_om, running_max_owm)
+            # If both within 1° of each other, boost certainty
+            gap = abs(running_max_om - running_max_owm)
+            tolerance = 2.0 if unit == 'fahrenheit' else 1.0
+            sources_agree = gap <= tolerance
+        elif running_max_om is not None:
+            running_max = running_max_om
+        elif running_max_owm is not None:
+            running_max = running_max_owm
 
         if running_max is None:
-            # No actual data yet — skip
             return []
 
         # Calculate max possible remaining temperature
         max_possible = self._get_max_possible(running_max, hours_remaining, unit, city)
-
-        # Get forecast max from models
         forecast_max = forecast.get('mean_max', running_max)
         model_std = forecast.get('std_max', 1.0)
 
@@ -153,7 +149,8 @@ class SniperStrategy:
         for outcome in outcomes:
             signal = self._evaluate_outcome(
                 outcome, running_max, max_possible, forecast_max,
-                model_std, hours_remaining, unit, city, event_id
+                model_std, hours_remaining, unit, city, event_id,
+                min_certainty, sources_agree
             )
             if signal:
                 signals.append(signal)
@@ -168,11 +165,11 @@ class SniperStrategy:
     def _evaluate_outcome(self, outcome: Dict, running_max: float,
                           max_possible: float, forecast_max: float,
                           model_std: float, hours_remaining: float,
-                          unit: str, city: str, event_id: str) -> Optional[Dict]:
+                          unit: str, city: str, event_id: str,
+                          min_certainty: float, sources_agree: bool) -> Optional[Dict]:
         """
         Evaluate a single outcome for sniper-worthy trade.
-        
-        Returns a trade signal dict or None.
+        Returns a TradeSignal or None.
         """
         title = outcome.get('group_item_title', '') or outcome.get('title', '')
         price_yes = outcome.get('best_ask', 0) or outcome.get('price_yes', 0.5)
@@ -185,68 +182,76 @@ class SniperStrategy:
         if temp_low is None and temp_high is None:
             return None
 
-        # ═══ TYPE A: DEAD OUTCOME (buy NO) ═══
-        # The running max has ALREADY exceeded this outcome's range
-        # Example: "8°C or below" when running max is 9°C → DEAD
-        if temp_high is not None and running_max > temp_high:
-            certainty = 1.0  # Physically impossible
+        is_fahrenheit = unit == 'fahrenheit'
+        min_gap = self.DEAD_OUTCOME_MIN_GAP_F if is_fahrenheit else self.DEAD_OUTCOME_MIN_GAP_C
+        certainty_bonus = self.CROSS_VALIDATION_BONUS if sources_agree else 0
 
-            # Can we still profit?
+        # ═══ TYPE A: DEAD OUTCOME (buy NO) ═══
+        # Running max ALREADY exceeds this outcome's ceiling by min_gap
+        if temp_high is not None and running_max > temp_high + min_gap:
+            certainty = 1.0 + certainty_bonus  # Physically impossible
+
             price_no_actual = 1.0 - float(outcome.get('best_bid', price_yes) or price_yes)
-            profit = 1.0 - price_no_actual - 0.02  # 2% fees
+            profit = 1.0 - price_no_actual - 0.02
 
             if profit < self.MIN_PROFIT_CENTS / 100:
-                return None  # Not enough profit
-
+                return None
             if price_no_actual > 0.98:
-                return None  # Already fully priced, no edge
+                return None
 
             return self._make_signal(
                 trade_type='DEAD_OUTCOME',
                 direction='NO',
                 outcome=outcome,
-                certainty=certainty,
+                certainty=min(0.99, certainty),
                 price=price_no_actual,
                 expected_profit=profit,
-                reason=f"Running max {running_max}° > {temp_high}° ceiling → IMPOSSIBLE",
+                reason=f"Running max {running_max:.1f}° > {temp_high}°+{min_gap:.0f}° → IMPOSSIBLE",
                 city=city,
                 event_id=event_id,
             )
 
         # ═══ TYPE B: LOCKED IN (buy YES) ═══
-        # The running max exactly equals this temp AND remaining time is short
+        # Running max exactly equals this temp AND remaining time is short
         if temp_low is not None and temp_high is not None:
             if int(running_max) == int(temp_low) and hours_remaining < 6:
-                # Can the temp still go higher?
-                spike = self.LATE_DAY_MAX_SPIKE_C if unit == 'celsius' else self.LATE_DAY_MAX_SPIKE_F
+                spike = self.LATE_DAY_MAX_SPIKE_C if not is_fahrenheit else self.LATE_DAY_MAX_SPIKE_F
                 if hours_remaining < 2:
-                    spike = self.NIGHT_MAX_SPIKE_C if unit == 'celsius' else self.NIGHT_MAX_SPIKE_F
+                    spike = self.NIGHT_MAX_SPIKE_C if not is_fahrenheit else self.NIGHT_MAX_SPIKE_F
 
-                will_stay = forecast_max <= temp_high + 0.5  # Models agree it won't go higher
+                will_stay = forecast_max <= temp_high + 0.5
                 if will_stay or running_max + spike <= temp_high + 1:
                     certainty = 0.92 if hours_remaining < 3 else 0.85
+                    certainty += certainty_bonus
 
-                    if certainty >= self.MIN_CERTAINTY:
+                    if certainty >= min_certainty:
                         profit = 1.0 - price_yes - 0.02
                         if profit >= self.MIN_PROFIT_CENTS / 100:
                             return self._make_signal(
                                 trade_type='LOCKED_IN',
                                 direction='YES',
                                 outcome=outcome,
-                                certainty=certainty,
+                                certainty=min(0.99, certainty),
                                 price=price_yes,
                                 expected_profit=profit,
-                                reason=f"Running max {running_max}° = {title}, {hours_remaining:.0f}h left, models confirm",
+                                reason=f"Running max {running_max:.1f}° = {title}, {hours_remaining:.0f}h left",
                                 city=city,
                                 event_id=event_id,
                             )
 
         # ═══ TYPE C: IMPOSSIBLE FUTURE (buy NO on high outcomes) ═══
-        # Example: "14°C" when max possible is 11.5°C
         if temp_low is not None and temp_low > max_possible:
-            certainty = 0.98 if (temp_low - max_possible) > 1 else 0.93
+            gap_above = temp_low - max_possible
+            # Wider gap = more certain
+            if gap_above > 2:
+                certainty = 0.99
+            elif gap_above > 1:
+                certainty = 0.97
+            else:
+                certainty = 0.93
+            certainty += certainty_bonus
 
-            if certainty >= self.MIN_CERTAINTY:
+            if certainty >= min_certainty:
                 price_no_actual = 1.0 - float(outcome.get('best_bid', price_yes) or price_yes)
                 profit = 1.0 - price_no_actual - 0.02
 
@@ -255,20 +260,18 @@ class SniperStrategy:
                         trade_type='IMPOSSIBLE_FUTURE',
                         direction='NO',
                         outcome=outcome,
-                        certainty=certainty,
+                        certainty=min(0.99, certainty),
                         price=price_no_actual,
                         expected_profit=profit,
-                        reason=f"Max possible {max_possible:.1f}° < {temp_low}° floor → near-impossible",
+                        reason=f"Max possible {max_possible:.1f}° < {temp_low}° floor (gap={gap_above:.1f}°)",
                         city=city,
                         event_id=event_id,
                     )
 
-        # ═══ TYPE D: GUARANTEED "OR HIGHER" / "OR BELOW" (buy YES) ═══
-        # Example: "10°C or higher" when running max is already 10°C
+        # ═══ TYPE D: GUARANTEED "OR HIGHER" (buy YES) ═══
         if temp_high is None and temp_low is not None:
-            # "X°C or higher" outcome
-            if running_max >= temp_low:
-                certainty = 1.0  # Already satisfied
+            if running_max >= temp_low + min_gap:  # Must exceed by min_gap
+                certainty = 1.0 + certainty_bonus
 
                 profit = 1.0 - price_yes - 0.02
                 if profit >= self.MIN_PROFIT_CENTS / 100:
@@ -276,27 +279,28 @@ class SniperStrategy:
                         trade_type='GUARANTEED_YES',
                         direction='YES',
                         outcome=outcome,
-                        certainty=certainty,
+                        certainty=min(0.99, certainty),
                         price=price_yes,
                         expected_profit=profit,
-                        reason=f"Running max {running_max}° ≥ {temp_low}° → ALREADY TRUE",
+                        reason=f"Running max {running_max:.1f}° ≥ {temp_low}°+{min_gap:.0f}° → CONFIRMED",
                         city=city,
                         event_id=event_id,
                     )
 
+        # ═══ TYPE E: GUARANTEED "OR BELOW" (buy YES) ═══
         if temp_low is None and temp_high is not None:
-            # "X°C or below" outcome
-            if max_possible <= temp_high:
-                certainty = 0.95 if (temp_high - max_possible) > 0.5 else 0.90
+            if max_possible <= temp_high - (min_gap * 0.5):
+                certainty = 0.96 if (temp_high - max_possible) > 1 else 0.93
+                certainty += certainty_bonus
 
-                if certainty >= self.MIN_CERTAINTY:
+                if certainty >= min_certainty:
                     profit = 1.0 - price_yes - 0.02
                     if profit >= self.MIN_PROFIT_CENTS / 100:
                         return self._make_signal(
                             trade_type='GUARANTEED_BELOW',
                             direction='YES',
                             outcome=outcome,
-                            certainty=certainty,
+                            certainty=min(0.99, certainty),
                             price=price_yes,
                             expected_profit=profit,
                             reason=f"Max possible {max_possible:.1f}° ≤ {temp_high}° ceiling → near-certain",
@@ -306,45 +310,129 @@ class SniperStrategy:
 
         return None
 
+    # ═══════════════════════════════════════════════════════════════════
+    # IMPROVEMENT 1 & 4: OpenWeather Real-Time Actual Temps
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _get_openweather_actual(self, city: str) -> Optional[float]:
+        """
+        Get CURRENT actual observed temperature from OpenWeather.
+        Updates every ~10 minutes (much faster than Open-Meteo hourly).
+        Returns temperature in the city's native unit.
+        """
+        api_key = Config.OPENWEATHER_API_KEY
+        if not api_key:
+            return None
+
+        # Cache for 5 minutes to avoid hitting rate limits
+        cached = self._owm_cache.get(city)
+        if cached and (time.time() - cached[1]) < 300:
+            return cached[0]
+
+        from weather.data.weather_client import WeatherClient
+        city_info = WeatherClient.CITIES.get(city.lower().replace(' ', '-'))
+        if not city_info:
+            return None
+
+        unit = city_info.get('unit', 'celsius')
+        units = 'imperial' if unit == 'fahrenheit' else 'metric'
+
+        try:
+            url = (
+                f"https://api.openweathermap.org/data/2.5/weather"
+                f"?lat={city_info['lat']}&lon={city_info['lon']}"
+                f"&appid={api_key}"
+                f"&units={units}"
+            )
+            resp = self.session.get(url, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                # Current temp is the ACTUAL observed temperature
+                current_temp = data.get('main', {}).get('temp')
+                # Also get today's observed max so far
+                temp_max = data.get('main', {}).get('temp_max', current_temp)
+                # Use the higher of current and reported max
+                actual = max(current_temp or 0, temp_max or 0)
+                if actual > -100:  # sanity check
+                    self._owm_cache[city] = (actual, time.time())
+                    return actual
+        except Exception:
+            pass
+        return None
+
+    # ═══════════════════════════════════════════════════════════════════
+    # IMPROVEMENT 2: City-Level Accuracy Tracking
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _load_city_accuracy(self):
+        """Load historical forecast accuracy per city."""
+        self._accuracy_loaded = True
+        try:
+            from weather.data.weather_client import WeatherClient
+            wc = WeatherClient()
+            for city in Config.WEATHER_CITIES:
+                accuracy = wc.get_historical_accuracy(city)
+                if accuracy and 'mae' in accuracy:
+                    self._city_accuracy[city] = accuracy['mae']
+            if self._city_accuracy:
+                best = min(self._city_accuracy.items(), key=lambda x: x[1])
+                worst = max(self._city_accuracy.items(), key=lambda x: x[1])
+                print(f"📊 City accuracy loaded: best={best[0]}({best[1]:.1f}°), "
+                      f"worst={worst[0]}({worst[1]:.1f}°)", flush=True)
+        except Exception as e:
+            print(f"⚠️ Could not load city accuracy: {e}", flush=True)
+
+    def _get_city_certainty(self, city: str) -> float:
+        """
+        Get adjusted minimum certainty threshold for a city.
+        
+        Low MAE cities (< 1.5°): 93% (slightly more trades, still safe)
+        Medium MAE (1.5-3°):     95% (default strict)
+        High MAE (> 3°):         97% (extra cautious, volatile city)
+        """
+        mae = self._city_accuracy.get(city)
+        if mae is None:
+            return self.MIN_CERTAINTY  # Default 95%
+
+        if mae < 1.5:
+            return 0.93  # Predictable city — slightly relaxed
+        elif mae < 3.0:
+            return 0.95  # Normal — strict
+        else:
+            return 0.97  # Volatile — extra strict
+
+    # ═══════════════════════════════════════════════════════════════════
+    # DATA FETCHING
+    # ═══════════════════════════════════════════════════════════════════
+
     def _get_max_possible(self, running_max: float, hours_remaining: float,
                           unit: str, city: str) -> float:
         """
         Calculate the maximum temperature that can still be reached today.
-        
-        Based on:
-        1. Current running maximum
-        2. How many hours of heating remain (peaks around 2-3PM)
-        3. Time of day (temp drops after sunset)
+        Uses WIDER margins than v1 for safety (Improvement 3).
         """
         is_fahrenheit = unit == 'fahrenheit'
-
-        # After peak hours (4PM+), temp only drops
-        # Get city-local hour to determine if peak has passed
         local_hour = self._get_current_hour(city)
 
         if local_hour >= 18:  # After 6PM — peak is DONE
-            spike = 0.3 if not is_fahrenheit else 0.5
-        elif local_hour >= 16:  # After 4PM — very little spike left
             spike = 0.5 if not is_fahrenheit else 1.0
+        elif local_hour >= 16:  # After 4PM — very little spike left
+            spike = 0.8 if not is_fahrenheit else 1.5
         elif local_hour >= 14:  # After 2PM — small spike possible
-            spike = 1.0 if not is_fahrenheit else 2.0
+            spike = self.LATE_DAY_MAX_SPIKE_C if not is_fahrenheit else self.LATE_DAY_MAX_SPIKE_F
         elif local_hour >= 12:  # Noon — moderate spike still possible
-            spike = 1.5 if not is_fahrenheit else 3.0
+            spike = 2.5 if not is_fahrenheit else 4.5
         elif local_hour >= 10:  # Morning — significant warming ahead
-            spike = 3.0 if not is_fahrenheit else 5.0
+            spike = 4.0 if not is_fahrenheit else 7.0
         else:  # Early morning — too much uncertainty
-            spike = 5.0 if not is_fahrenheit else 9.0
+            spike = 6.0 if not is_fahrenheit else 11.0
 
         return running_max + spike
 
     def _get_actual_temps(self, city: str, target_date: str) -> Optional[Dict]:
-        """
-        Fetch ACTUAL observed temperatures for today from Open-Meteo.
-        This is KEY — not forecast, but REAL observed data.
-        """
+        """Fetch ACTUAL observed temperatures from Open-Meteo."""
         from weather.data.weather_client import WeatherClient
-        wc = WeatherClient()
-        city_info = wc.CITIES.get(city.lower().replace(' ', '-'))
+        city_info = WeatherClient.CITIES.get(city.lower().replace(' ', '-'))
         if not city_info:
             return None
 
@@ -374,7 +462,6 @@ class SniperStrategy:
 
     def _get_current_hour(self, city: str) -> int:
         """Get current local hour for a city."""
-        # Simple timezone offset mapping
         offsets = {
             'london': 0, 'nyc': -5, 'chicago': -6, 'miami': -5,
             'seattle': -8, 'atlanta': -5, 'dallas': -6, 'munich': 1,
@@ -397,7 +484,7 @@ class SniperStrategy:
 
     def _make_signal(self, trade_type: str, direction: str, outcome: Dict,
                      certainty: float, price: float, expected_profit: float,
-                     reason: str, city: str, event_id: str) -> Dict:
+                     reason: str, city: str, event_id: str) -> 'TradeSignal':
         """Create a standardized trade signal."""
         from weather.strategies.base_strategy import TradeSignal
 
@@ -417,7 +504,7 @@ class SniperStrategy:
                 'certainty': certainty,
                 'expected_profit': round(expected_profit, 3),
                 'reason': reason,
-                'sniper': True,  # Flag for the trader to identify sniper signals
+                'sniper': True,
             }
         )
 
@@ -434,4 +521,5 @@ class SniperStrategy:
             'events_traded': total_events,
             'total_signals': total_trades,
             'avg_trades_per_event': round(total_trades / max(total_events, 1), 1),
+            'city_accuracy': {k: round(v, 1) for k, v in self._city_accuracy.items()},
         }

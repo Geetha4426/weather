@@ -72,8 +72,11 @@ class Config:
             'nyc,london,chicago,miami,seattle,atlanta,dallas,munich,lucknow').split(',')
     ]
 
-    # Scan interval: 2 minutes (from real bot insights)
+    # Scan intervals: dynamic based on resolution proximity (Improvement 5)
     WEATHER_SCAN_INTERVAL = int(os.getenv('WEATHER_SCAN_INTERVAL', '120'))
+    WEATHER_SCAN_INTERVAL_FAST = int(os.getenv('WEATHER_SCAN_INTERVAL_FAST', '30'))   # Resolution day < 6h
+    WEATHER_SCAN_INTERVAL_MED = int(os.getenv('WEATHER_SCAN_INTERVAL_MED', '60'))     # Resolution day 6-12h
+    WEATHER_SCAN_INTERVAL_SLOW = int(os.getenv('WEATHER_SCAN_INTERVAL_SLOW', '300'))  # 2+ days out
 
     # Entry edge threshold: 15% (forecast_prob - market_price > 0.15 to BUY)
     WEATHER_MIN_EDGE = float(os.getenv('WEATHER_MIN_EDGE', '0.15'))
