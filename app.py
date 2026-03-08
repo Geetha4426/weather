@@ -256,34 +256,6 @@ class WeatherTradingEngine:
 
                     seconds_remaining = self.weather_markets.get_seconds_until_resolution(market)
 
-                    # ═══ ML ENHANCEMENT: Apply bias correction to forecast ═══
-                    raw_mean = forecast.get('mean_max', 0)
-                    corrected_mean = self.bias_corrector.correct(city, raw_mean)
-                    if abs(corrected_mean - raw_mean) > 0.1:
-                        forecast['mean_max'] = corrected_mean
-                        forecast['bias_correction'] = round(raw_mean - corrected_mean, 2)
-                        # Rebuild probability distribution with corrected mean
-                        if hasattr(self.weather_client, '_build_probability_distribution'):
-                            forecast['probability_distribution'] = \
-                                self.weather_client._build_probability_distribution(
-                                    corrected_mean, forecast.get('std_max', 1.0),
-                                    forecast.get('unit', 'celsius')
-                                )
-
-                    # ═══ ML ENHANCEMENT: Set Bayesian prior from ensemble ═══
-                    prob_dist = forecast.get('probability_distribution', {})
-                    if prob_dist:
-                        self.bayesian_updater.set_prior(city, target_date_str, prob_dist)
-
-                    # ═══ ML ENHANCEMENT: Track prices for momentum signals ═══
-                    for outcome in market.get('outcomes', []):
-                        yes_token = outcome.get('token_id_yes', '')
-                        if yes_token:
-                            self.price_momentum.record_price(
-                                yes_token, outcome.get('price_yes', 0),
-                                outcome.get('volume_24h', 0)
-                            )
-
                     context = {
                         'clob': self.clob,
                         'weather_client': self.weather_client,
