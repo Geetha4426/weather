@@ -159,7 +159,7 @@ class SniperStrategy:
                 signals.append(signal)
 
         # Sort by certainty (highest first) and take top MAX_TRADES_PER_EVENT
-        signals.sort(key=lambda s: s.get('certainty', 0), reverse=True)
+        signals.sort(key=lambda s: s.confidence, reverse=True)
         remaining_slots = self.MAX_TRADES_PER_EVENT - self._trade_count.get(event_id, 0)
         signals = signals[:remaining_slots]
 
