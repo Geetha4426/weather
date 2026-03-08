@@ -16,15 +16,15 @@ class TradeSignal:
         self,
         strategy: str,
         city: str,
-        target_date: str,
         direction: str,        # 'YES' or 'NO' (betting for/against a temp outcome)
         outcome_label: str,    # e.g., "14°C"
-        temp_c: int,           # Parsed temperature
         token_id: str,         # YES or NO token
-        market_id: str,        # Polymarket condition_id
         entry_price: float,
         confidence: float,
-        rationale: str,
+        target_date: str = '',
+        temp_c: int = 0,
+        market_id: str = '',
+        rationale: str = '',
         metadata: Dict = None,
     ):
         self.strategy = strategy
